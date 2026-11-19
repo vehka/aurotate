@@ -1,0 +1,4 @@
+tools/aurpeaks
+*.wav
+*.flac
+*.m4a

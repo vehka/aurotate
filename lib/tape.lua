@@ -1,0 +1,265 @@
+-- tape: engine glue, transport and params for the tape voice
+
+local cs = require 'controlspec'
+
+local Tape = {}
+
+-- read-only for the UI; written by polls and the transport
+Tape.st = {
+  pos = 0, rate = 0, ok = 1, misses = 0, dur = 0, path = nil,
+  jogging = false, pending_in = nil,
+}
+local st = Tape.st
+
+Tape.dirty = true
+
+local polls = {}
+
+-- shuttle positions for E3; 0 and 1 are detents
+Tape.SHUTTLE = { -64, -32, -16, -8, -4, -2, -1.5, -1, -0.5, -0.25, 0,
+  0.25, 0.5, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 2, 4, 8, 16, 32, 64 }
+local DETENT_TICKS = 3
+local DETENT_RESET = 0.4
+local detent = { acc = 0, last = 0 }
+
+-- jog (scrub with inertia), ported from norns MultiTape (audio.multitape.jog_turn)
+local JOG_SPEED_TIME = 0.1 -- seconds over which the turning speed is averaged
+local JOG_MAX_BOOST = 200
+local jog = { last = 0, speed = 0 }
+
+local function mem_total_mb()
+  local f = io.open('/proc/meminfo')
+  if not f then return 0 end
+  local s = f:read('*l') or ''
+  f:close()
+  return (tonumber(s:match('(%d+)')) or 0) / 1024
+end
+
+function Tape.hms(s, frac)
+  s = math.max(0, s or 0)
+  local whole = math.floor(s)
+  local str = string.format('%d:%02d:%02d', whole // 3600, (whole % 3600) // 60, whole % 60)
+  if frac then str = str .. string.format('.%d', math.floor((s - whole) * 10)) end
+  return str
+end
+
+---- transport
+
+function Tape.playing()
+  return params:get('aur_shuttle') ~= 0 and not st.jogging
+end
+
+-- leaves jog mode (the engine glides from the jog speed)
+local function shuttle_action(r)
+  st.jogging = false
+  engine.rate(r, params:get('aur_glide'))
+  Tape.dirty = true
+end
+
+function Tape.play() params:set('aur_shuttle', 1) end
+function Tape.stop() params:set('aur_shuttle', 0) end
+function Tape.toggle()
+  if Tape.playing() then Tape.stop() else Tape.play() end
+end
+
+local function nearest_step(r)
+  local best, bi = math.huge, 1
+  for i, v in ipairs(Tape.SHUTTLE) do
+    local d = math.abs(v - r)
+    if d < best then best, bi = d, i end
+  end
+  return bi
+end
+
+-- E3: step through the shuttle positions; leaving 0 or 1 takes a few ticks
+function Tape.shuttle_turn(d)
+  local cur = st.jogging and 0 or params:get('aur_shuttle')
+  local t = util.time()
+  if cur == 0 or cur == 1 then
+    if t - detent.last > DETENT_RESET or (detent.acc > 0) ~= (d > 0) then detent.acc = 0 end
+    detent.last = t
+    detent.acc = detent.acc + d
+    if math.abs(detent.acc) < DETENT_TICKS then return end
+    d = detent.acc > 0 and 1 or -1
+  end
+  detent.acc = 0
+  local i = util.clamp(nearest_step(cur) + d, 1, #Tape.SHUTTLE)
+  params:set('aur_shuttle', Tape.SHUTTLE[i])
+end
+
+-- E2: one slow tick moves the tape by `nudge` ms; fast turning pushes harder
+function Tape.jog_turn(d)
+  local t = util.time()
+  if not st.jogging then
+    st.jogging = true
+    jog.last = t - 1
+    jog.speed = 0
+    params:set('aur_shuttle', 0, true) -- silent: the engine keeps its speed and coasts
+  end
+  local dt = math.max(0, t - jog.last)
+  jog.last = t
+  -- turning speed in ticks per second, averaged so close ticks don't spike;
+  -- a lone tick reads as 1 / JOG_SPEED_TIME, which counts as no extra speed
+  jog.speed = jog.speed * math.exp(-dt / JOG_SPEED_TIME) + math.abs(d) / JOG_SPEED_TIME
+  local excess = math.max(0, jog.speed - 1 / JOG_SPEED_TIME)
+  local push = (params:get('aur_jog_nudge') / 1000) / params:get('aur_jog_stop')
+  local boost = math.min(JOG_MAX_BOOST, 1 + params:get('aur_jog_accel') * (excess / 20) ^ 2)
+  engine.jog_nudge(d * push * boost)
+  Tape.dirty = true
+end
+
+function Tape.jump(sec)
+  engine.jump(util.clamp(sec, 0, math.max(0, st.dur)))
+end
+
+---- loop
+
+local function send_loop()
+  local a, b = params:get('aur_loop_in'), params:get('aur_loop_out')
+  if a > b then a, b = b, a end
+  engine.loop(params:get('aur_loop') == 1 and 1 or 0, a, b)
+end
+
+-- K3: set loop in, then loop out (which starts the loop); K3 again ends it
+function Tape.loop_key()
+  if params:get('aur_loop') == 1 then
+    params:set('aur_loop', 0)
+  elseif st.pending_in == nil then
+    st.pending_in = st.pos
+  else
+    local a, b = st.pending_in, st.pos
+    st.pending_in = nil
+    if a > b then a, b = b, a end
+    if b - a < 0.05 then return end
+    params:set('aur_loop_in', a)
+    params:set('aur_loop_out', b)
+    params:set('aur_loop', 1)
+  end
+  Tape.dirty = true
+end
+
+function Tape.loop_cancel()
+  st.pending_in = nil
+  Tape.dirty = true
+end
+
+---- files
+
+function Tape.open(path, start)
+  if path == nil or path == '' or path:sub(-1) == '/' or not util.file_exists(path) then return false end
+  local ch, samples, rate = audio.file_info(path)
+  if not samples or samples <= 0 or not rate or rate <= 0 then
+    print('aurotate: not a sound file: ' .. path)
+    return false
+  end
+  st.path = path
+  st.name = path:match('[^/]*$'):gsub('%.%w+$', '')
+  st.dur = samples / rate
+  st.ch = ch
+  st.pos = start or 0
+  st.pending_in = nil
+  st.jogging = false
+  params:set('aur_shuttle', 0, true)
+  engine.open(path, start or 0, params:get('aur_ring'))
+  send_loop()
+  Tape.dirty = true
+  return true
+end
+
+---- params
+
+local function time_spec()
+  -- 0.1 s per encoder tick over a 24 h range
+  return cs.new(0, 24 * 3600, 'lin', 0, 0, 's', 0.1 / (24 * 3600))
+end
+
+local function fmt_time(p) return Tape.hms(p:get(), true) end
+
+function Tape.add_params()
+  local pi3 = mem_total_mb() < 1500
+  params:add_group('aur_tape', 'TAPE', 16)
+
+  params:add_file('aur_file', 'tape', _path.audio)
+  params:set_action('aur_file', function(path)
+    if path ~= st.path then Tape.open(path, 0) end
+  end)
+
+  params:add_trigger('aur_play', 'play / stop')
+  params:set_action('aur_play', function() Tape.toggle() end)
+
+  params:add_control('aur_shuttle', 'speed', cs.new(-64, 64, 'lin', 0, 0, 'x', 0.25 / 128))
+  params:set_action('aur_shuttle', shuttle_action)
+  params:set_save('aur_shuttle', false)
+
+  params:add_control('aur_level', 'level', cs.new(-60, 6, 'lin', 0, 0, 'dB'))
+  params:set_action('aur_level', function(db) engine.amp(db <= -60 and 0 or util.dbamp(db)) end)
+
+  params:add_control('aur_glide', 'spin up / down', cs.new(0.02, 3, 'exp', 0, 0.4, 's'))
+
+  params:add_separator('aur_sep_jog', 'scrub (E2)')
+  params:add_control('aur_jog_nudge', 'scrub nudge', cs.new(0.5, 200, 'exp', 0, 10, 'ms'))
+  params:add_control('aur_jog_accel', 'scrub acceleration', cs.new(0, 10, 'lin', 0, 3, ''))
+  params:add_control('aur_jog_stop', 'scrub stop time', cs.new(0.05, 3, 'exp', 0, 0.5, 's'))
+  params:set_action('aur_jog_stop', function(x) engine.jog_stop(x) end)
+
+  params:add_separator('aur_sep_loop', 'loop (K3)')
+  params:add_binary('aur_loop', 'loop', 'toggle', 0)
+  params:set_action('aur_loop', function(v)
+    if v == 1 then
+      st.pending_in = nil
+      local a, b = params:get('aur_loop_in'), params:get('aur_loop_out')
+      if a > b then a, b = b, a end
+      -- a loop is entered by crossing its edge; start inside it
+      if st.pos < a or st.pos >= b then Tape.jump(a) end
+    end
+    send_loop()
+    Tape.dirty = true
+  end)
+  params:add_control('aur_loop_in', 'loop in', time_spec(), fmt_time)
+  params:set_action('aur_loop_in', send_loop)
+  params:add_control('aur_loop_out', 'loop out', time_spec(), fmt_time)
+  params:set_action('aur_loop_out', send_loop)
+
+  params:add_separator('aur_sep_mem', 'memory')
+  params:add_number('aur_ring', 'ring window', 16, 600, pi3 and 64 or 120, function(p) return p:get() .. ' s' end)
+  params:set_action('aur_ring', function(s) if st.path then engine.ring(s) end end)
+  params:add_control('aur_fade', 'seek / seam fade', cs.new(1, 50, 'exp', 0, 8, 'ms'))
+  params:set_action('aur_fade', function(ms) engine.fade(ms / 1000) end)
+end
+
+---- polls
+
+function Tape.start_polls()
+  local handlers = {
+    aur_pos = function(v)
+      st.pos = v
+      -- the engine parks at the ends; reflect that in the speed param
+      if not st.jogging then
+        local r = params:get('aur_shuttle')
+        if (r > 0 and v >= st.dur - 0.01) or (r < 0 and v <= 0) then
+          params:set('aur_shuttle', 0, true)
+        end
+      end
+    end,
+    aur_rate = function(v) st.rate = v end,
+    aur_ok = function(v) st.ok = v end,
+    aur_misses = function(v) st.misses = v end,
+  }
+  for name, fn in pairs(handlers) do
+    local p = poll.set(name)
+    p.time = 1 / 20
+    p.callback = function(v)
+      fn(v)
+      Tape.dirty = true
+    end
+    p:start()
+    polls[#polls + 1] = p
+  end
+end
+
+function Tape.cleanup()
+  for _, p in ipairs(polls) do p:stop() end
+  polls = {}
+end
+
+return Tape
