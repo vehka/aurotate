@@ -1,4 +1,4 @@
-# aurotate: implementation plan (draft 3, after phase 1)
+# aurotate: implementation plan (draft 4, after phase 2)
 
 An audio-anthropology workbench for norns: play recordings hours long on an
 analog-feeling tape, mark points and regions, attach notes and per-region
@@ -120,6 +120,17 @@ P1 and P2 serve three purposes:
 The level for a given speed is chosen as `|rate| ≥ decimation`, with a
 crossfade between levels.
 
+**As built (phase 2):** proxies are **mono** on every platform (P1 stereo on
+the Pi 4 is deferred: at ≥ 8× or during a 50 ms focus nobody hears the
+width). Each level crossfades in over one octave of speed around its factor
+(P1: 5.7–11.3×, P2: 45–90×). A missing chunk is covered by P1 if loaded,
+else P2. The proxies are lowpassed at 0.45 × their rate × |speed| to remove
+interpolation images. With P2 loaded the shuttle goes to ±256× (aliasing
+above 64×, since P2 is the coarsest level; masked by the lifter; a P3 ÷512
+is the fix if it bothers by ear). sclang loads proxies in 2^19-frame pieces
+between ring reads (the NRT queue is shared), and the ring stops streaming
+above the speed where a proxy takes over (11.3× with P1, 90× with P2 only).
+
 ### 2.3 Analysis pass (one time per file, cached; measured, see §1)
 - One disk pass, as a background job at nice +10:
   `sox in -t raw - | tee >(aurpeaks …) >(sox … P1) | sox … P2`.
@@ -129,6 +140,13 @@ crossfade between levels.
 - Cache in `norns.state.data/cache/<id>/` with `id = hash(path, size, mtime)`.
 - The tape is playable before analysis finishes: the window streams, there is
   no proxy yet, and the waveform appears in pieces as the analysis proceeds.
+- **As built:** `tools/analyze.sh` (named FIFOs rather than `>(…)`, so every
+  branch is waited for), detached with `setsid nice -n 10 ionice -c2 -n7`;
+  one job at a time, killed (process group) on another open or cleanup.
+  `aurpeaks` reads raw s16 on stdin, is built on first use into
+  `dust/data/aurotate/bin/`, and writes `AURPK2` (level 0 + ×16 + ×256,
+  format in its header) with `n0 = 0` until done, so a reader can draw level 0
+  from a growing file (phase 3). Proxies are only used after the pass ends.
 
 ### 2.3b File formats (working copies; the masters live elsewhere)
 - **Import** converts every tape into one working format:
@@ -369,7 +387,7 @@ Write to `_path.data/aurotate/exports/<tape>/`:
 |---|---|---|
 | 0 | ✅ **Feasibility spike** (2026-11-19, Pi 3 only; see §1) | done. Still open: Pi 4 run, CPU numbers (§9.3) |
 | 1 | ✅ **Transport** (2026-11-19, Pi 3; see §9.1): tape voice, jog with inertia (port MultiTape `jog_turn`), shuttle, loop, position poll, params; `spike_test` kept as `test/transport.lua` | done: a 3 h WAV and a 1 h 56 min FLAC field recording play, scrub, loop and park without dropouts; CPU baseline in §9.3; hands-on test on the device: works well. Open: sporadic xruns (§9.1) |
-| 2 | Analysis + cache (`aurpeaks` + sox in one pass, P1/P2, with reduced levels) and proxy crossfade, cue sounds, "focus" on far seeks | the FF/REW cue sounds like tape, and far seeks come into focus. CPU at 64× and >64× cue recorded |
+| 2 | ✅ **Analysis + cache** (2026-11-19, Pi 3; see §9.1): `aurpeaks` + sox in one pass, P1/P2, reduced levels; proxy crossfade, lifter cue, focus on far seeks, shuttle to ±256× | done: CPU at 8–256× recorded (§9.3), far seeks covered by the proxy, analysis during playback without xruns; hands-on on the device: "great" (user, 2026-11-19) |
 | 3 | Tape view UI: zoomed view + whole-tape strip, ruler, zoom, waveform from the raw peaks string, page dots | the waveform reads well at every zoom level, with redraw under budget (≤15 fps, no rendering in poll callbacks). Lua heap measured |
 | 4 | Marks/regions model, tape document store, region drawing, popups, keyboard notes | annotations survive a restart and a PSET change |
 | 5 | Regions list + reader popup, exports (md, Audacity, VTT, CSV), excerpts | export opens correctly in Audacity and a VTT player |
@@ -395,21 +413,66 @@ lib/ui/regions.lua  settings.lua  popup.lua
 - Engine vs. core: the SC engine passed phase 0 on a Pi 3; no core changes.
 - File formats: FLAC working copies, imported (§2.3b).
 - Pi 3: supported with a 64 s ring + P2 proxy; P1 only for files up to ~1 h.
+- Proxies mono everywhere; proxy memory is a param (Pi 3 128 MB, else 600 MB),
+  P2 first, then P1 if both fit.
+- Lifter = head contact at speed: above 2× (fully at 4×) the sound is lowpassed
+  (800 Hz…16 kHz), highpassed (40…440 Hz), driven and attenuated by the lifter
+  amount; 100 % is silent winding.
 - E1 = zoom, K1+E1 = screen.
 - Overlapping regions mix (§3); masking fails closed.
 - Speaker masking: insert for audition, render to disk for public copies (§4.7).
 
 ## 9. Development notes (read this first in a new session)
 
-### 9.1 State of the code after phase 1
+### 9.1 State of the code after phase 2
 | file | status |
 |---|---|
-| `lib/sc/AurTape.sc` | The ring + feeder + transport. One instance per voice (`id`; OSC handlers filter on node id + reply id). Next: proxies (phase 2), output stage (phase 6) |
-| `Engine_Aurotate.sc` | Commands: `open sff` (path, start s, ring s), `ring f`, `rate ff`, `jog_nudge f`, `jog_stop f`, `jump f`, `loop iff`, `amp f`, `fade f`, `phase s`. Polls: `aur_pos`, `aur_rate`, `aur_ok`, `aur_misses`, `aur_dur`. **Never name a command `load`** (collides with `engine.load`) |
-| `lib/tape.lua` | Engine glue, transport (play/stop, shuttle steps with detents at 0 and 1×, jog ported from `audio.multitape.jog_turn`, K3 loop in/out), params group TAPE, polls |
-| `aurotate.lua` | Minimal transport screen (time, state, whole-tape bar with loop band). Replaced by the tape view in phase 3. Globals for the REPL: `dbg_status()`, `transport_test(path, sections)`, `clicks_test(path)` |
-| `test/transport.lua` | Automated run: idle, 1×, near/far seeks, FF 2–64×, REW, scrub bursts, 5 loops (incl. reverse and longer than the ring), loop escape, end/start parking. Writes `dust/data/aurotate/transport_report.txt` (engine) and `transport_lua.txt` (xruns, jack CPU, PASS/FAIL). `clicks_test` records the output with the system TAPE while seeking/looping |
-| `tools/aurpeaks.c` | Unchanged. Add the reduced levels (×16, ×256) and stdin input in phase 2 |
+| `lib/sc/AurTape.sc` | The ring + feeder + transport + proxies (P1/P2 PlayBufs synced to the file position, focus crossfade, lifter cue). One instance per voice (`id`; OSC handlers filter on node id + reply id). Next: output stage (phase 6) |
+| `Engine_Aurotate.sc` | Commands: `open sff` (path, start s, ring s), `ring f`, `rate ff`, `jog_nudge f`, `jog_stop f`, `jump f`, `loop iff`, `amp f`, `fade f`, `proxy iss` (level, tape path, proxy path or ""), `lifter f`, `focus f`, `phase s`. Polls: `aur_pos`, `aur_rate`, `aur_ok`, `aur_misses`, `aur_dur`, `aur_proxies` (bitmask), `aur_proxy_share`. **Never name a command `load`** (collides with `engine.load`) |
+| `lib/tape.lua` | Engine glue, transport (play/stop, shuttle steps with detents at 0 and 1×, ±128/256 only with P2, jog ported from `audio.multitape.jog_turn`, K3 loop in/out), proxy budget → `engine.proxy`, params group TAPE (20), polls |
+| `lib/analysis.lua` | Cache dir (`<name>-<fnv(path, size, mtime)>`), detached job, 1 s watcher for `done` / `fail` / `progress`, kill on stop |
+| `lib/peaks.lua` | `AURPK2` reader (one string, `string.byte`), `columns(p, t0, t1, w)` picks the coarsest level with ≥ 1 bin per column. Start of phase 3 |
+| `aurotate.lua` | Minimal transport screen: time, state (incl. FOCUS), whole-tape waveform strip from the peaks (brightness → level) with loop band, analysis progress. Replaced by the tape view in phase 3. REPL globals: `dbg_status()`, `transport_test(path, sections)`, `clicks_test(path)` |
+| `test/transport.lua` | Phase 1 sections (idle, 1×, seeks, FF 2–64×, REW, scrub, loops, parking) plus `analysis` (drops the cache, plays 1× through a fresh analysis) and `cue` (FF/REW 8–256×, far seeks with focus); option `proxy_mb`. Not in the default run. Lines now include `mem_avail_mb`, `covers`, `proxy_max`, `p1`, `p2` (proxy state at the end of the phase) |
+| `tools/aurpeaks.c`, `tools/analyze.sh` | The analysis pass (§2.3) |
+
+**Phase 2 result** (shield, Pi 3B+, 64 s ring, fx rack + mods; `field_L.flac`,
+1 h 56 min mono FLAC):
+
+| | P2 only (default 128 MB budget) | P1 + P2 (300 MB) |
+|---|---|---|
+| analysis, cold, tape playing at 1× | 53 s; 0 xruns, 0 misses; jack CPU 32 % (20 % without) | — |
+| cache | p1 83 MB, p2 10 MB, peaks 1.5 MB | |
+| proxy load (RAM) | P2 21 MB in 0.2–0.6 s | P1 167 MB in 4.2 s; MemAvailable 377 → 225 MB |
+| FF 8 / 16 / 32 / 64× | full res streams (0.8–6.1 MB/s), scsynth 20.3–23.9 % | 8×: streams; ≥ 16×: P1, **0 reads**, 20.3–20.8 % |
+| FF 128 / 256×, REW 256× | P2, 0 reads, 21.0–21.8 % | same |
+| far seeks ×15 | proxy plays at once (`proxy_max` 1.0), full res after 46 ms avg / 140 ms max; 0 misses | 52 / 159 ms; 0 misses |
+
+The phase 1 run (`transport_test()`, P2 loaded) still passes every check with
+0 misses and 0 xruns in all phases. Hands-on (cue, focus, seeks): works well.
+
+Fixed after the hands-on test:
+- K1+E2 twice before the next position poll seeked from the stale position
+  (+60 +60 = +63 s): `Tape.jump` now sets `st.pos` at once.
+- A stray E2 tick just before/after K1 entered scrub, which takes over from
+  play and coasts to a stop (it looked like "two seeks stop the tape"). E2
+  ticks within 0.4 s of a K1+E2 seek (or of releasing K1 after one) are now
+  ignored. Phase 3 redoes the controls (E1 zoom, K1+E1 screen); keep the grace.
+- A `rate` command that arrived while a file was still opening was lost
+  (phase 1 bug): `open` resets the rate when the command arrives, `load`
+  applies whatever rate is current.
+
+**Open after phase 2:**
+- **By ear, in detail** (the overall feel is approved): P1 vs P2 cue, lifter
+  0/50/100 %, aliasing from P2 above 64× (a P3 ÷512 would fix it).
+- **Base load rose ~4.5 %:** idle scsynth is 20.6 % (phase 1: 15.0–15.9 %).
+  Likely the always-running proxy PlayBufs, LPFs and the stereo cue chain;
+  not isolated. If it matters, gate the cue chain (or the proxies) with
+  `Pause`-style sub-synths, or measure with the fx rack off first.
+- Proxies come in only when the analysis ends; the peaks file grows during it
+  but nothing draws it yet (phase 3).
+- In the test report, `p1`/`p2` show the proxy state when a phase *ends*
+  (e.g. `analysing_play1x` shows p2=1, but `proxy_max=0.0` there is right).
 
 **Transport design (all in the synth, sample-accurate):**
 - Rate: `Lag` glide (spin up/down, param). Jog: `Integrator` with friction
@@ -448,8 +511,9 @@ run on `field_L.flac`, speed/loop/edge sections on `test3h.wav`):
 | hands-on (K2, E2 scrub, E3 shuttle, K3 loops, by ear) | works well (user, 2026-11-19) | |
 | clicks (`clicks_test`, 440 Hz sine) | none at seeks, loop seams (fwd/rev/4×), spin up/down; two slope kinks (≤ 6× a clean sine's max d2) at scrub takeover / reversal | |
 
-**Open after phase 1:**
-- **Sporadic xruns:** 3 in one phase of one run (reverse 10 s loop, no disk
+**Open after phase 1** (status after phase 2 in *italics*):
+- **Sporadic xruns:** *none in ~45 phases of the phase 2 runs, including a
+  fresh analysis during playback.* 3 in one phase of one run (reverse 10 s loop, no disk
   reads, CPU peak 22 %) and 2 in another run (200 s loop at 16×); 0 in the
   other ~100 phases. Not CPU-bound. Check whether they correlate with
   something outside the engine (matron, SD card, the fx rack) before phase 2
@@ -461,6 +525,18 @@ run on `field_L.flac`, speed/loop/edge sections on `test3h.wav`):
 - `_norns.restart()` once wedged the whole stack (sclang stuck in "server
   already booting", matron stuck at "setting up jack clients"). Recovery:
   `sudo systemctl restart norns-jack`, then `norns-main norns-sclang`.
+
+### 9.1b Next: phase 3 (tape view)
+Start from `lib/peaks.lua` (`Peaks.load`, `Peaks.columns`) and the strip in
+`aurotate.lua`'s `redraw`. To do there:
+- level 0 from a *growing* peaks file while the analysis runs (`n0 = 0` in the
+  header means "count from the size"; reload it every few seconds);
+- the brightness → level mapping: on `field_L` (speech) the whole strip came
+  out at levels 4–5; stretch it (per-tape min/max of `bright`, or rms-weighted);
+- zoom from 1/128 s/px to whole tape (§4.1), redraw ≤ 15 fps, no drawing in
+  poll callbacks, Lua heap measured (`collectgarbage('count')`);
+- the FOCUS state is `Tape.focusing()` (`aur_proxy_share` > 0.05 below 6×):
+  draw the dithered waveform near the playhead from it (§4.1).
 
 ### 9.2 Test assets on the shield (keep; ~2.3 GB)
 `we@10.0.0.138:~/dust/audio/aurotate-spike/`:
@@ -478,6 +554,10 @@ run on `field_L.flac`, speed/loop/edge sections on `test3h.wav`):
   research material: keep on the device, don't publish or commit.
 - `sine440.wav`: 20 min mono 440 Hz at −6 dB, for click checks.
 - `clicks.wav`: the last `clicks_test` recording.
+- Analysis cache for `field_L.flac` in `dust/data/aurotate/cache/field_L-d8063cae/`
+  (p1 83 MB, p2 10 MB, peaks). Test reports from phase 2 in
+  `dust/data/aurotate/transport_{report,lua}_{phase1,cue_p2,cue_p1}.txt` and
+  the latest full run in `transport_{report,lua}.txt`.
 
 ### 9.3 CPU testing plan
 **Phase 1 baseline** (scsynth avg / peak %, from the engine-side report; the
@@ -487,8 +567,17 @@ fx rack and mods are loaded, which is most of the base load):
 |---|---|---|---|---|---|---|---|
 | 15.0–15.9 / 21 | 15.6 / 23 | 16.8 / 26 | 16.6 / 24 | 19.8 / 27 · 21.3 / 28 | 16 / 24 | 16.7 / 26 | 15–16.5 / 23–26 |
 
+**Phase 2** (scsynth avg %, `field_L.flac`):
+
+| idle | 1× | far seeks | FF 16× | FF 64× | FF 128× | FF 256× | REW 256× | analysis running, 1× |
+|---|---|---|---|---|---|---|---|---|
+| 20.6 | 20.0 | 21.3–21.5 | 21.3 (P2 only, streams) · 20.4 (P1) | 23.9 (P2 only, streams) · 20.8 (P1) | 21.0 | 21.4–21.8 | 20.8–21.2 | 31.6 (jack) |
+
+With a proxy covering the speed, FF/REW costs the same as 1×: the ring stops
+streaming. The voice's base cost rose ~4.5 % (see §9.1).
+
 The tape voice itself costs ~0.5 % at 1× and ~5 % at 64× (disk + cubic
-interpolation). Jack CPU (`_norns.audio_get_cpu_load`) tracks scsynth within
+interpolation) in phase 1. Jack CPU (`_norns.audio_get_cpu_load`) tracks scsynth within
 1 %. Isolated peaks of 37–61 % appeared during FF 8× in 3 of 5 runs, without
 xruns.
 
@@ -515,6 +604,12 @@ per-voice inserts, fx rack.
   load the script and **grep the sclang journal for errors**. The REPL says
   `<ok>` even when the SynthDef failed.
 - Lua-only changes: `norns.script.load("code/aurotate/aurotate.lua")`.
+- Phase 2 tests: `transport_test(nil, {analysis = true, cue = true})` (~5 min),
+  `transport_test(nil, {cue = true, proxy_mb = 300})` for P1 on a long file.
+  The analysis cache is `dust/data/aurotate/cache/<name>-<hash>/`; a failed
+  pass leaves its reason in `fail` there (and `build.log` for aurpeaks).
+- sclang Events: a key that is an Object method (`next`, `rate`, `path`,
+  `size`…) never reaches the dictionary; `p.next` called `Object:next`.
 - Tests: `transport_test()` (~8 min) or a subset, e.g.
   `transport_test(nil, {loops = true, edges = true})`; sections `basic`,
   `speed`, `scrub`, `loops`, `edges`. Wait for `dust/data/aurotate/transport_done`.

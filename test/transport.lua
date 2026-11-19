@@ -4,7 +4,11 @@
 --   transport_test()                       -- default file
 --   transport_test('/home/we/dust/audio/x.flac')
 --   transport_test(nil, {loops = true, edges = true})
---     sections: basic, speed, scrub, loops, edges
+--     sections: basic, speed, scrub, loops, edges, analysis, cue
+--   transport_test(nil, {analysis = true, cue = true, proxy_mb = 300})
+--     analysis: drops the cache, plays at 1x while the file is analysed
+--     cue: waits for the proxies, then FF/REW up to 256x and far seeks
+--     proxy_mb: proxy memory for the run (e.g. enough for P1 on a long file)
 --
 -- results:
 --   dust/data/aurotate/transport_report.txt  engine side, one line per phase:
@@ -15,6 +19,14 @@
 local T = {}
 
 local DEFAULT = _path.audio .. 'aurotate-spike/field_L.flac'
+
+local function mem_avail_mb()
+  for line in io.lines('/proc/meminfo') do
+    local v = line:match('^MemAvailable:%s+(%d+)')
+    if v then return tonumber(v) // 1024 end
+  end
+  return -1
+end
 
 function T.run(Tape, path, only)
   local st = Tape.st
@@ -34,8 +46,10 @@ function T.run(Tape, path, only)
   local function close_phase()
     if not cur then return end
     local x = _norns.audio_get_xrun_count() -- resets on read
-    local line = string.format('%s xruns=%d jack_cpu_avg=%.1f jack_cpu_max=%.1f pos_min=%.2f pos_max=%.2f',
-      cur.name, x, cur.cpu_sum / math.max(1, cur.cpu_n), cur.cpu_max, cur.pmin, cur.pmax)
+    local line = string.format('%s xruns=%d jack_cpu_avg=%.1f jack_cpu_max=%.1f pos_min=%.2f pos_max=%.2f'
+      .. ' mem_avail_mb=%d proxies=%d',
+      cur.name, x, cur.cpu_sum / math.max(1, cur.cpu_n), cur.cpu_max, cur.pmin, cur.pmax,
+      mem_avail_mb(), st.proxies)
     if cur.check then
       local ok, why = cur.check(cur)
       line = line .. (ok and ' PASS' or (' FAIL ' .. (why or '')))
@@ -96,7 +110,60 @@ function T.run(Tape, path, only)
     params:set('aur_file', path)
     clock.sleep(3)
     log(string.format('duration %.1f s', st.dur))
-    local function want(sec) return only == nil or only[sec] end
+    local function want(sec)
+      if only == nil then return sec ~= 'analysis' and sec ~= 'cue' end
+      return only[sec]
+    end
+    if only and only.proxy_mb then params:set('aur_proxy_mb', only.proxy_mb) end
+
+    if want('analysis') then
+    -- fresh analysis while the tape plays (does it cause xruns or misses?)
+    rest()
+    local A = include('lib/analysis')
+    engine.proxy(1, st.path, '')
+    engine.proxy(2, st.path, '')
+    os.execute('rm -rf ' .. A.cache_dir(path))
+    Tape.open(path, rnd())
+    clock.sleep(2)
+    phase('analysing_play1x')
+    local t0 = util.time()
+    set_speed(1)
+    while Tape.analysis.state == 'running' and util.time() - t0 < 600 do clock.sleep(1) end
+    log(string.format('analysis %s after %.1f s (%s)', Tape.analysis.state, util.time() - t0,
+      tostring(Tape.analysis.info and Tape.analysis.info.secs)))
+    phase('proxies_loading')
+    t0 = util.time()
+    while st.proxies < 2 and util.time() - t0 < 30 do clock.sleep(0.2) end
+    clock.sleep(3)
+    end
+
+    if want('cue') then
+    rest()
+    local t0 = util.time()
+    while (Tape.analysis.state == 'running' or st.proxies < 2) and util.time() - t0 < 600 do clock.sleep(1) end
+    clock.sleep(5) -- P1 may still be loading
+    log(string.format('proxies %d (budget %d MB)', st.proxies, params:get('aur_proxy_mb')))
+    for _, r in ipairs { 8, 16, 32, 64, 128, 256, -64, -256 } do
+      rest()
+      Tape.jump(r > 0 and 60 or st.dur - 60)
+      set_speed(1)
+      clock.sleep(1.5)
+      phase((r > 0 and 'ff' or 'rew') .. math.abs(r) .. '_cue')
+      set_speed(r)
+      clock.sleep(12)
+    end
+    rest()
+    Tape.jump(rnd())
+    set_speed(1)
+    clock.sleep(2)
+    phase('seek_far_focus')
+    for _ = 1, 15 do
+      Tape.jump(rnd())
+      clock.sleep(3)
+    end
+    phase('play1x_proxies')
+    clock.sleep(20)
+    end
 
     if want('basic') then
     phase('idle_loaded')

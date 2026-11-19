@@ -1,6 +1,8 @@
 -- tape: engine glue, transport and params for the tape voice
 
 local cs = require 'controlspec'
+local Analysis = include 'lib/analysis'
+local Peaks = include 'lib/peaks'
 
 local Tape = {}
 
@@ -8,7 +10,11 @@ local Tape = {}
 Tape.st = {
   pos = 0, rate = 0, ok = 1, misses = 0, dur = 0, path = nil,
   jogging = false, pending_in = nil,
+  proxies = 0,     -- engine: bit 1 P1 loaded, bit 2 P2
+  proxy_share = 0, -- engine: 0..1 of the sound from the proxies
+  peaks = nil,     -- lib/peaks object once analysed
 }
+Tape.analysis = Analysis.st
 local st = Tape.st
 
 Tape.dirty = true
@@ -16,8 +22,9 @@ Tape.dirty = true
 local polls = {}
 
 -- shuttle positions for E3; 0 and 1 are detents
-Tape.SHUTTLE = { -64, -32, -16, -8, -4, -2, -1.5, -1, -0.5, -0.25, 0,
-  0.25, 0.5, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 2, 4, 8, 16, 32, 64 }
+-- beyond ±64 only with the P2 proxy loaded (Tape.max_speed)
+Tape.SHUTTLE = { -256, -128, -64, -32, -16, -8, -4, -2, -1.5, -1, -0.5, -0.25, 0,
+  0.25, 0.5, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 2, 4, 8, 16, 32, 64, 128, 256 }
 local DETENT_TICKS = 3
 local DETENT_RESET = 0.4
 local detent = { acc = 0, last = 0 }
@@ -45,12 +52,27 @@ end
 
 ---- transport
 
+function Tape.max_speed()
+  return (st.proxies & 2) ~= 0 and 256 or 64
+end
+
+-- a proxy stands in for the full resolution near normal speed: the tape is
+-- coming into focus after a far seek
+function Tape.focusing()
+  return st.path ~= nil and st.proxy_share > 0.05 and math.abs(st.rate) < 6
+end
+
 function Tape.playing()
   return params:get('aur_shuttle') ~= 0 and not st.jogging
 end
 
 -- leaves jog mode (the engine glides from the jog speed)
 local function shuttle_action(r)
+  local m = Tape.max_speed()
+  if math.abs(r) > m then
+    params:set('aur_shuttle', util.clamp(r, -m, m))
+    return
+  end
   st.jogging = false
   engine.rate(r, params:get('aur_glide'))
   Tape.dirty = true
@@ -84,6 +106,7 @@ function Tape.shuttle_turn(d)
   end
   detent.acc = 0
   local i = util.clamp(nearest_step(cur) + d, 1, #Tape.SHUTTLE)
+  if math.abs(Tape.SHUTTLE[i]) > Tape.max_speed() then return end
   params:set('aur_shuttle', Tape.SHUTTLE[i])
 end
 
@@ -109,7 +132,11 @@ function Tape.jog_turn(d)
 end
 
 function Tape.jump(sec)
-  engine.jump(util.clamp(sec, 0, math.max(0, st.dur)))
+  sec = util.clamp(sec, 0, math.max(0, st.dur))
+  -- the engine takes the new position at once; set it here too, so a second
+  -- seek before the next poll starts from it (not from the old position)
+  st.pos = sec
+  engine.jump(sec)
 end
 
 ---- loop
@@ -143,6 +170,33 @@ function Tape.loop_cancel()
   Tape.dirty = true
 end
 
+---- analysis and proxies
+
+-- proxy sizes in RAM (float32 mono) for the analysed tape
+local function proxy_bytes(info, level)
+  local r = info['p' .. level .. '_rate']
+  return info.frames * r / info.rate * 4
+end
+
+-- send the proxies that fit the memory budget: P2 first (small), then P1
+function Tape.send_proxies()
+  local a = Analysis.st
+  if not st.path or a.state ~= 'done' or not a.info or not a.info.frames then return end
+  local budget = params:get('aur_proxy_mb') * 1e6
+  local b2 = proxy_bytes(a.info, 2)
+  local b1 = proxy_bytes(a.info, 1)
+  local use2 = b2 <= budget
+  local use1 = (use2 and b1 + b2 or b1) <= budget
+  engine.proxy(2, st.path, use2 and a.dir .. 'p2.wav' or '')
+  engine.proxy(1, st.path, use1 and a.dir .. 'p1.wav' or '')
+end
+
+local function analysed(dir)
+  st.peaks = Peaks.load(dir .. 'peaks')
+  Tape.send_proxies()
+  Tape.dirty = true
+end
+
 ---- files
 
 function Tape.open(path, start)
@@ -159,9 +213,12 @@ function Tape.open(path, start)
   st.pos = start or 0
   st.pending_in = nil
   st.jogging = false
+  st.peaks = nil
+  st.proxies = 0
   params:set('aur_shuttle', 0, true)
   engine.open(path, start or 0, params:get('aur_ring'))
   send_loop()
+  Analysis.start(path, samples, analysed)
   Tape.dirty = true
   return true
 end
@@ -177,7 +234,7 @@ local function fmt_time(p) return Tape.hms(p:get(), true) end
 
 function Tape.add_params()
   local pi3 = mem_total_mb() < 1500
-  params:add_group('aur_tape', 'TAPE', 16)
+  params:add_group('aur_tape', 'TAPE', 20)
 
   params:add_file('aur_file', 'tape', _path.audio)
   params:set_action('aur_file', function(path)
@@ -187,7 +244,7 @@ function Tape.add_params()
   params:add_trigger('aur_play', 'play / stop')
   params:set_action('aur_play', function() Tape.toggle() end)
 
-  params:add_control('aur_shuttle', 'speed', cs.new(-64, 64, 'lin', 0, 0, 'x', 0.25 / 128))
+  params:add_control('aur_shuttle', 'speed', cs.new(-256, 256, 'lin', 0, 0, 'x', 0.25 / 512))
   params:set_action('aur_shuttle', shuttle_action)
   params:set_save('aur_shuttle', false)
 
@@ -195,6 +252,12 @@ function Tape.add_params()
   params:set_action('aur_level', function(db) engine.amp(db <= -60 and 0 or util.dbamp(db)) end)
 
   params:add_control('aur_glide', 'spin up / down', cs.new(0.02, 3, 'exp', 0, 0.4, 's'))
+
+  params:add_separator('aur_sep_cue', 'cue + focus')
+  params:add_control('aur_lifter', 'lifter (at speed)', cs.new(0, 100, 'lin', 1, 50, '%'))
+  params:set_action('aur_lifter', function(x) engine.lifter(x / 100) end)
+  params:add_control('aur_focus', 'focus time', cs.new(4, 1000, 'exp', 1, 150, 'ms'))
+  params:set_action('aur_focus', function(ms) engine.focus(ms / 1000) end)
 
   params:add_separator('aur_sep_jog', 'scrub (E2)')
   params:add_control('aur_jog_nudge', 'scrub nudge', cs.new(0.5, 200, 'exp', 0, 10, 'ms'))
@@ -225,6 +288,9 @@ function Tape.add_params()
   params:set_action('aur_ring', function(s) if st.path then engine.ring(s) end end)
   params:add_control('aur_fade', 'seek / seam fade', cs.new(1, 50, 'exp', 0, 8, 'ms'))
   params:set_action('aur_fade', function(ms) engine.fade(ms / 1000) end)
+  -- proxies held in RAM: P2 (3 h mono ≈ 32 MB) first, then P1 (1 h ≈ 86 MB)
+  params:add_number('aur_proxy_mb', 'proxy memory', 0, 2048, pi3 and 128 or 600, function(p) return p:get() .. ' MB' end)
+  params:set_action('aur_proxy_mb', function() Tape.send_proxies() end)
 end
 
 ---- polls
@@ -244,6 +310,8 @@ function Tape.start_polls()
     aur_rate = function(v) st.rate = v end,
     aur_ok = function(v) st.ok = v end,
     aur_misses = function(v) st.misses = v end,
+    aur_proxies = function(v) st.proxies = math.floor(v + 0.5) end,
+    aur_proxy_share = function(v) st.proxy_share = v end,
   }
   for name, fn in pairs(handlers) do
     local p = poll.set(name)
@@ -260,6 +328,7 @@ end
 function Tape.cleanup()
   for _, p in ipairs(polls) do p:stop() end
   polls = {}
+  Analysis.stop()
 end
 
 return Tape
