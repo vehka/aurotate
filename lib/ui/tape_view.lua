@@ -6,12 +6,15 @@
 --     14    loop bar
 --     15–17 flags: marks, and regions at their start (filled: has a note)
 --     16–50 waveform (playhead at x = 64); regions are bands with the
---           waveform cut out of them (a negative), marks 1 px lines
+--           waveform cut out of them (a negative), marks 1 px lines; a
+--           region with sound settings has a checkered bottom edge, a
+--           send-as-insert region a checkered top edge as well
 --     54    marks on the whole tape (dots)
 --     54–63 whole tape: waveform, regions, loop, bracket for the part shown above
 
 local Peaks = include 'lib/peaks'
 local Draw = include 'lib/ui/draw'
+local Sound = include 'lib/sound'
 
 local V = {}
 
@@ -206,6 +209,34 @@ local function fill_bands(doc, st, out, levels, t0, spp)
       end
     end
   end
+end
+
+-- regions with sound: the band's two bottom rows checkered (band level and
+-- black), and its two top rows too for a send-as-insert region
+local function draw_snd(doc, t0, spp)
+  if not doc then return end
+  local t1 = t0 + W * spp
+  local yb, yt = WAVE_Y + WAVE_H, WAVE_Y - WAVE_H
+  local any = false
+  for _, r in ipairs(doc.regions) do
+    if r.t0 >= t1 then break end
+    if r.snd and r.t1 > t0 then
+      local x0, x1 = x_range(r.t0, r.t1, t0, spp)
+      local ins = Sound.insert_send(r) ~= nil
+      -- both colours drawn, so it shows whatever the waveform cut out
+      for x = x0, x1 do
+        local odd, lv = x % 2, math.max(band[x + 1], 1)
+        Draw.add(0, x, yb - odd, 1, 1)
+        Draw.add(lv, x, yb - 1 + odd, 1, 1)
+        if ins then
+          Draw.add(0, x, yt + odd, 1, 1)
+          Draw.add(lv, x, yt + 1 - odd, 1, 1)
+        end
+      end
+      any = true
+    end
+  end
+  if any then Draw.flush() end
 end
 
 -- a level-0 line through the band columns at y (cuts the baseline out);
@@ -419,6 +450,7 @@ function V.redraw(Tape, page, pages, doc, here)
   fill_bands(doc, st, band, BAND, t0, spp)
   Draw.runs(0, WAVE_Y - WAVE_H, 2 * WAVE_H + 1, W, band)
   draw_wave(Tape, st, spp, t0, ph_x)
+  draw_snd(doc, t0, spp)
   draw_marks(doc, t0, spp, here)
   -- playhead (dim while the chunk under it loads)
   screen.level(st.ok > 0 and 15 or 5)

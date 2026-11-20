@@ -12,6 +12,7 @@ Tape.st = {
   jogging = false, pending_in = nil,
   proxies = 0,     -- engine: bit 1 P1 loaded, bit 2 P2
   proxy_share = 0, -- engine: 0..1 of the sound from the proxies
+  fx = 0,          -- engine: bit 1 fx send a found, bit 2 send b
   peaks = nil,     -- lib/peaks object once analysed
 }
 Tape.analysis = Analysis.st
@@ -334,6 +335,7 @@ function Tape.start_polls()
     aur_misses = function(v) st.misses = v end,
     aur_proxies = function(v) st.proxies = math.floor(v + 0.5) end,
     aur_proxy_share = function(v) st.proxy_share = v end,
+    aur_fx = function(v) st.fx = math.floor(v + 0.5) end,
   }
   for name, fn in pairs(handlers) do
     local p = poll.set(name)

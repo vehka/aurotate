@@ -10,12 +10,14 @@
 -- notes.md, for a re-import later (phase 5b):
 --   - each item is a `## ` heading followed by `<!-- aur:<id> -->`; the id
 --     (m3, r12) is what matches it to the document, the rest is for reading
---   - the line after it is metadata (id, exact times, enclosing region, tags)
+--   - the line after it is metadata (id, exact times, enclosing region, tags,
+--     a region's sound settings that differ from neutral)
 --   - then the note, verbatim. Lines that would read as a heading or an aur
 --     comment get a leading backslash (Markdown shows `\#` as `#`); a re-import
 --     strips one backslash from such lines.
 
 local Model = include 'lib/model'
+local Sound = include 'lib/sound'
 
 local Export = {}
 
@@ -163,6 +165,13 @@ function Export.markdown(doc, opts)
       local h = {}
       for i, tag in ipairs(item.tags) do h[i] = Export.hashtag(tag) end
       meta[#meta + 1] = table.concat(h, ' ')
+    end
+    if item.snd then
+      local h = {}
+      for _, f in ipairs(Sound.FIELDS) do
+        if item.snd[f] ~= nil then h[#h + 1] = f:gsub('_', ' ') .. ' ' .. Sound.format(f, item.snd[f]) end
+      end
+      meta[#meta + 1] = 'sound: ' .. table.concat(h, ', ')
     end
     add('## ' .. head .. (name(item) and (' · ' .. name(item)) or ''))
     add('<!-- aur:' .. item.id .. ' -->')

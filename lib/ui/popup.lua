@@ -3,7 +3,8 @@
 --
 -- Three kinds:
 --   item    the mark or region under the playhead: label, note, tags, times,
---           delete. E2 row, E3 value, K3 edit, K2 close.
+--           a region's sound (dry, send a, send b, gain, pan, tone), delete.
+--           E2 row, E3 value (K1: fine), K3 edit (on a sound row: reset), K2 close.
 --   editor  a note, word-wrapped, with a cursor. Typed on a USB keyboard
 --           (lib/keys.lua sends the keys here); on the device K3 opens
 --           textentry with the whole note. K2 close.
@@ -33,13 +34,21 @@ local function ui_font() screen.font_face(1) screen.font_size(8) end
 local function text_font() screen.font_face(25) screen.font_size(6) end
 P.text_font = text_font
 
-local Tape, Annot
+local Tape, Annot, RS, Sound
+-- sound rows: row name -> field
+local SND_ROWS = { dry = 'dry', ['send a'] = 'send_a', ['send b'] = 'send_b', gain = 'gain', pan = 'pan', tone = 'tone' }
+local SND_ORDER = { 'dry', 'send a', 'send b', 'gain', 'pan', 'tone' }
 local layer = nil -- nil | { kind = 'item' | 'editor', ... }
 P.modal = false   -- textentry is open
 
 function P.init(tape, annot)
   Tape, Annot = tape, annot
   Model, Store = annot.Model, annot.Store
+end
+
+-- lib/region_sound (the sound rows' warnings)
+function P.sound(rs)
+  RS, Sound = rs, rs.Sound
 end
 
 function P.active() return layer ~= nil end
@@ -179,6 +188,9 @@ local function item_rows(item)
   if Model.is_region(item) then
     rows[#rows + 1] = 'in'
     rows[#rows + 1] = 'out'
+    if Sound then
+      for _, name in ipairs(SND_ORDER) do rows[#rows + 1] = name end
+    end
   else
     rows[#rows + 1] = 'time'
   end
@@ -206,6 +218,16 @@ local function row_value(l, name)
   if name == 'out' then return hms(item.t1) end
   if name == 'time' then return hms(item.t) end
   if name == 'delete' then return l.confirm and 'K3 again' or '' end
+  local field = SND_ROWS[name]
+  if field then
+    local v = Sound.get(item, field)
+    local s = Sound.format(field, v)
+    if v > 0 and (field == 'send_a' or field == 'send_b') then
+      local ok, why = RS.send_ok(field:sub(-1))
+      if not ok then s = s .. ' (' .. why .. ')' end
+    end
+    return s
+  end
   return ''
 end
 
@@ -218,6 +240,8 @@ end
 local function draw_item(l)
   local item = l.item
   local right = Model.is_region(item) and fmt_len(item.t1 - item.t0) or hms(item.t)
+  -- on the sound rows: say when the region can't be heard
+  if SND_ROWS[l.rows[l.row]] then right = RS.warning(item) or right end
   title((Model.is_region(item) and 'REGION ' or 'MARK ') .. item.id, right)
   local top = util.clamp(l.row - NROWS + 1, 1, math.max(1, l.row))
   top = math.min(top, math.max(1, #l.rows - NROWS + 1))
@@ -236,8 +260,8 @@ local function draw_item(l)
     local v = row_value(l, name)
     if name == 'label' or name == 'note' or name == 'tags' then text_font() end
     screen.level(sel and 15 or 8)
-    screen.move(TX + 28, y)
-    screen.text(util.trim_string_to_width(v, TW - 30))
+    screen.move(TX + 32, y)
+    screen.text(util.trim_string_to_width(v, TW - 34))
   end
   -- scroll hint
   if #l.rows > NROWS then
@@ -520,7 +544,10 @@ function P.key(n, z, shift)
   end
   local name = l.rows[l.row]
   if name ~= 'delete' then l.confirm = false end
-  if name == 'label' then
+  if SND_ROWS[name] then
+    local f = SND_ROWS[name]
+    Model.set_snd(Store.doc(), l.item, f, Sound.DEFAULT[f])
+  elseif name == 'label' then
     edit_label(l.item, 'label', l.item.id .. ' label')
   elseif name == 'note' then
     P.open_editor(l.item, 'note', l)
@@ -558,7 +585,15 @@ function P.enc(n, d, shift)
     l.confirm = false
   elseif n == 3 then
     local name = l.rows[l.row]
-    if name == 'tags' and #l.palette > 0 then
+    if SND_ROWS[name] then
+      local f = SND_ROWS[name]
+      local step = Sound.STEP[f][shift and 1 or 2]
+      local v = Sound.get(l.item, f)
+      -- gain: below -40 dB jump to off and back
+      if f == 'gain' and d < 0 and v - step < -40 then v = Sound.OFF_DB + step end
+      if f == 'gain' and d > 0 and v <= Sound.OFF_DB then v = -40 - step end
+      Model.set_snd(Store.doc(), l.item, f, v + d * step)
+    elseif name == 'tags' and #l.palette > 0 then
       l.tag_i = (l.tag_i - 1 + d) % #l.palette + 1
     elseif name == 'in' or name == 'out' or name == 'time' then
       -- 0.1 s a tick, 1 s with K1; audition the edge once the turning stops

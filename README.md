@@ -4,8 +4,9 @@ An audio-anthropology workbench for norns: play recordings hours long on an
 analog-feeling tape, mark and annotate them, and give regions their own
 sound. Work in progress; see `docs/PLAN.md`.
 
-Current state: **phase 5 in progress**: marks, regions and notes (phase 4),
-the **regions list** with a reader, and **notes export as Markdown**. A SuperCollider engine streams
+Current state: **phase 6**: marks, regions and notes (phase 4), the
+**regions list** with a reader and **notes export as Markdown** (phase 5), and
+**per-region sound** (phase 6). A SuperCollider engine streams
 the file from disk through a RAM ring window, so length is limited by disk,
 not RAM. When a tape is opened for the first time it is analysed in the
 background (about 1 minute per 2 hours on a Pi 3; the tape plays meanwhile).
@@ -20,7 +21,7 @@ shown above). Louder sound draws taller, brighter-sounding sound draws
 brighter. While a tape is analysed for the first time its waveform grows in
 as the pass goes; a far seek draws the waveform near the playhead dithered
 until the tape is in focus. The four dots at the top are pages (collection,
-tape, regions, settings); only the tape page exists so far.
+tape, regions, settings); the tape and regions pages exist so far.
 
 On the tape you drop **marks** (points) and **regions** (stretches), and give
 each a label, a note and tags. Regions show as bright bands with the waveform
@@ -40,10 +41,30 @@ loops the selected region, K2 plays / stops. On a USB keyboard Up/Down,
 PgUp/PgDn and Home/End select, Enter jumps; the transport hotkeys work as on
 the tape page.
 
+**Region sound:** a region can change how the tape sounds while the
+playhead is inside it: *dry* (the direct sound), *send a* / *send b* (into the
+fx mod's two send chains), *gain*, *pan* and *tone* (a tilt: dark … bright).
+Set them in the region's popup (K1+K3, the rows after *out*: E3 changes, K1+E3
+in finer steps, K3 resets the row) or in PARAMS > SOUND > *region here*,
+which always shows the innermost region under the playhead and edits it, so
+those params can be MIDI-mapped to tweak whatever region is playing. Where
+regions overlap they combine: dry multiplies, sends and gain (dB), pan and
+tone add. Changes glide at the boundaries (*boundary glide*, 50 ms) and start
+exactly at them, also after a seek or a loop wrap. *region sound* off makes
+every region neutral. A region with sound has a checkered bottom edge on the
+tape and a ♪ on the regions page.
+
+**Send-as-insert:** dry 0 % and send a (or b) 100 % hears the region only
+through that send's effects: an effect on just that stretch of tape. In the
+fx mod, set the send's own tap level to 0, so it gets only what regions send
+it. Such a region has a checkered top edge too. Without the fx mod, or with
+nothing in the send, the sends go nowhere: the popup says `(no fx)` or
+`(empty)` next to a send, and `SILENT` when the region can't be heard.
+
 **Export:** PARAMS > TAPE > *export notes (md)* writes
 `dust/data/aurotate/exports/<tape>/notes.md` (reach it over SMB or `scp`):
 one section per mark and region in tape order, with its times, label,
-enclosing region, tags (as `#hashtags`) and note. The previous export is kept
+enclosing region, tags (as `#hashtags`), sound settings and note. The previous export is kept
 as `notes.md.bak`. The `<!-- aur:m3 -->` lines tie each section to its mark or
 region, for reading edits back in later; leave them as they are.
 
@@ -67,7 +88,7 @@ region, for reading edits back in later; leave them as they are.
 | K2 | play / stop (spins up / down) |
 | K3 tap | mark |
 | K3 hold | region in (the selection grows from there); K3 again: region out |
-| K1+K3 | open the mark or region under the playhead (label, note, tags, times, delete); with a region in pending: cancel it |
+| K1+K3 | open the mark or region under the playhead (label, note, tags, times, sound, delete); with a region in pending: cancel it |
 | K1+K2 | loop the region under the playhead; again: loop off |
 | K3 with no tape | choose one |
 
@@ -109,6 +130,8 @@ notes_test()            -- marks/regions store (also off the device: lua5.3 test
 transport_test()        -- ~8 min; results in dust/data/aurotate/transport_*.txt
 transport_test(nil, {analysis = true, cue = true})  -- fresh analysis while playing; cue speeds
 clicks_test()           -- records the output while seeking/looping a sine
+sound_test()            -- region sound: records a sine through test regions;
+                        -- then tools/sound_check.py sound.wav sound_events.txt
 export_notes()          -- same as PARAMS > TAPE > export notes (md)
 dbg_status()            -- transport state, redraw time and Lua heap
 dbg_shot('name')        -- screenshot to dust/data/aurotate/name.png

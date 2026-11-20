@@ -184,6 +184,62 @@ function T.run(dir)
   check('md written', p_md and io.open(p_md) ~= nil)
   check('md bak', p_md and io.open(p_md .. '.bak') ~= nil)
 
+  -- region sound (phase 6)
+  local Sound = include 'lib/sound'
+  local s = Model.new('/x/snd.flac', 1000, 1)
+  local big = Model.add_region(s, 100, 300)
+  local mid = Model.add_region(s, 150, 200)
+  local plain = Model.add_region(s, 400, 500)
+  check('snd none', not Sound.has(big) and #Sound.segments(s) == 0)
+  Model.set_snd(s, big, 'gain', -6)
+  Model.set_snd(s, big, 'send_a', 0.4)
+  Model.set_snd(s, big, 'dry', 0.5)
+  Model.set_snd(s, mid, 'send_a', 0.8)
+  Model.set_snd(s, mid, 'dry', 0)
+  Model.set_snd(s, mid, 'gain', 3)
+  Model.set_snd(s, mid, 'pan', 2) -- clamped
+  check('snd clamp', mid.snd.pan == 1, mid.snd.pan)
+  local segs = Sound.segments(s)
+  check('snd segments', #segs == 3, #segs)
+  local function seg(i) return segs[i] and string.format('%g-%g', segs[i][1], segs[i][2]) end
+  check('snd bounds', seg(1) == '100-150' and seg(2) == '150-200' and seg(3) == '200-300',
+    tostring(seg(1)) .. ' ' .. tostring(seg(2)) .. ' ' .. tostring(seg(3)))
+  local c = segs[2] and segs[2][3] or {}
+  check('snd combine', c.dry == 0 and c.send_a == 1 and c.gain == -3 and c.pan == 1,
+    string.format('%s %s %s %s', c.dry, c.send_a, c.gain, c.pan))
+  check('snd outer alone', segs[1] and segs[1][3].dry == 0.5 and segs[1][3].send_a == 0.4)
+  check('snd insert', Sound.insert_send(mid) == nil and Sound.insert_send(plain) == nil)
+  Model.set_snd(s, mid, 'send_a', 1)
+  check('snd insert a', Sound.insert_send(mid) == 'a')
+  -- equal neighbours join; neutral stretches are left out
+  local q = Model.new('/x/q.flac', 1000, 1)
+  local q1 = Model.add_region(q, 10, 20)
+  local q2 = Model.add_region(q, 20, 30)
+  Model.set_snd(q, q1, 'tone', 0.5)
+  Model.set_snd(q, q2, 'tone', 0.5)
+  local qs = Sound.segments(q)
+  check('snd join', #qs == 1 and qs[1][1] == 10 and qs[1][2] == 30, #qs)
+  Model.set_snd(q, q2, 'tone', 0)
+  check('snd back to neutral drops snd', q2.snd == nil)
+  -- off gain wins
+  Model.set_snd(q, q2, 'gain', -60)
+  local q3 = Model.add_region(q, 22, 25)
+  Model.set_snd(q, q3, 'gain', 12)
+  local off = Sound.combine({ q2, q3 })
+  check('snd off wins', off.gain == -60, off.gain)
+  -- round trip through the store and validation
+  local sv = Store.serialise(s)
+  local back = Model.validate(load(sv, 'snd', 't', {})())
+  local rb = back and Model.find(back, mid.id)
+  check('snd round trip', rb and rb.snd and rb.snd.dry == 0 and rb.snd.send_a == 1 and rb.snd.gain == 3)
+  local bad = Model.validate({ version = 1, regions = { { id = 'r1', t0 = 1, t1 = 2, snd = { dry = 'x', gain = 99, pan = 0 } } } })
+  check('snd validate', bad and bad.regions[1].snd and bad.regions[1].snd.gain == 12 and bad.regions[1].snd.dry == nil
+    and bad.regions[1].snd.pan == nil)
+  local bad2 = Model.validate({ version = 1, regions = { { id = 'r1', t0 = 1, t1 = 2, snd = 5 } } })
+  check('snd validate junk', bad2 and bad2.regions[1].snd == nil)
+  local smd = Export.markdown(s, { now = 0 })
+  check('md sound', smd:find('sound: dry 0%, send a 100%, gain +3.0 dB, pan R 100', 1, true) ~= nil)
+
   print(string.format('model_test: %d passed, %d failed', passes, fails))
   if fails == 0 then rm_rf(dir) end
   return fails

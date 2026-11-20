@@ -1,4 +1,4 @@
-# aurotate: implementation plan (draft 7, phase 5 in progress)
+# aurotate: implementation plan (draft 8, phase 6 built)
 
 An audio-anthropology workbench for norns: play recordings hours long on an
 analog-feeling tape, mark points and regions, attach notes and per-region
@@ -181,6 +181,15 @@ above the speed where a proxy takes over (11.3× with P1, 90× with P2 only).
     transformation, phase 7). `FxUnit.all` exposes the registered effect
     functions, so a voice can instance an fx v2 effect *inside the voice*.
     That makes a true per-region insert, without the global rack.
+- **As built (phase 6):** `lib/sc/AurOut.sc`, one per voice, in a voice group
+  after the tape synth (tape → voice bus → AurOut → `context.out_b`, sends).
+  Order: tilt EQ (`BLowShelf` 250 Hz −9·tone dB, `BHiShelf` 2.5 kHz +9·tone
+  dB), balance (unity in the middle), gain, then dry / send A / send B. In fx
+  v2, `FxSetup.sendA/B` are the send chain buses and exist as soon as the rack
+  is built (an empty send has its return muted, so writing to it is silent);
+  the engine looks them up every 2 s (fx v1, a late rack) and writes to a
+  private bus while there is none. Cost: within the noise (idle 18.9 %, 1×
+  20.8 % scsynth on the shield; phase 2 had 20.6 / 20.0).
 
 ### 2.5 Memory budget (params, with per-platform defaults from MemTotal)
 | | Pi 4 / fates 4 GB | Pi 3 / shield 1 GB |
@@ -229,6 +238,21 @@ region  = { id, t0, t1, label, note, tags, color,
   50 ms). Lua computes the combination (a sorted interval list, recomputed
   only when a boundary is crossed). The engine receives one flat settings
   set per voice.
+
+  **As built (phase 6):** Lua (`lib/sound.lua`) turns the regions with sound
+  into segments (only those regions make boundaries; neutral stretches are
+  left out, equal neighbours joined) and sends the list when it changes
+  (`snd_clear n`, `snd_seg` × n, `snd_commit n`). sclang holds it as a
+  partition of the tape. The synth holds the current segment's bounds and
+  three sets (previous, current, next) and switches on the control block
+  where the position crosses a bound, then asks sclang to re-centre
+  (SendReply, also 8×/s while outside, so a lost reply or a double crossing
+  recovers). The position comes from the tape synth on a control bus, in
+  seconds, with a jump/wrap trigger; after a jump or wrap the new settings
+  apply without a glide for 30 ms (the jump lands in silence). Boundaries
+  are thus exact to a control block (measured: ~1 ms between boundaries),
+  not to the 20 Hz position poll. Gain −60 dB means off and wins over any
+  added gain. Not built yet: `rate` (region voices, phase 7), inserts, mask.
 - "Current region" params (`aur_cur_dry`, `aur_cur_send_a`, …) mirror the
   innermost region under the playhead. You can PMAP them to MIDI CCs and edit whatever
   region is playing. This keeps editing params-first (§modern.md), even though
@@ -415,7 +439,7 @@ Write to `_path.data/aurotate/exports/<tape>/`:
 | 3 | ✅ **Tape view UI** (2026-11-19, Pi 3; see §9.1): zoomed view + whole-tape strip, ruler, zoom, waveform from the raw peaks string, page dots, growing waveform during analysis, focus dither | done: reads well at every zoom (screenshots, `field_L`), redraw 5.5 ms avg at 1×, 8.5 ms at FF 64× (15 fps, no drawing in polls), Lua heap 3.9 MB after GC; hands-on on the device: "works great" (user, 2026-11-20) |
 | 4 | ✅ **Marks, regions, notes** (2026-11-20, Pi 3; see §9.1): model + tape document store, K3 tap/hold gestures, region bands and mark flags, item popup and note editor, USB keyboard notes and hotkeys | done: annotations survive a script reload, a reboot and PSET switches between two tapes (each with its own notes and position); off-device and on-device store tests pass. Hands-on on the device still to do |
 | 5 | ✅ Regions list + reader popup (2026-11-20); exports: ✅ md, Audacity / VTT / CSV still to do; excerpts still to do | export opens correctly in Audacity and a VTT player |
-| 6 | Per-region sound: output stage, fx v2 sends, send-as-insert, boundary glides, current-region params | regions change sound at boundaries without clicks; works without the fx mod |
+| 6 | ✅ **Per-region sound** (2026-11-20, Pi 3; see §9.1): output stage, fx v2 sends, send-as-insert, boundary glides, current-region params | done: `sound_test()` levels exact (−12 dB, mute, hard pan, nested +6 dB) and no clicks at boundaries, loop wraps or jumps; sends fall back to a private bus without fx. Hands-on (by ear, an effect in a send) still to do |
 | 7 | Region voices + MIDI triggers (note→region mapping and learn, choke groups, one-shot/gate/loop modes) | 4-voice polyphony from MIDI with instant attack |
 | 8 | Collection view, split-file reels, wall-clock time | — |
 | 9 | Grid; aurotate's own effects (voice transformation) in the per-voice insert slot | — |
@@ -465,14 +489,18 @@ lib/ui/regions.lua  settings.lua  popup.lua
 | `lib/ui/tape_view.lua` | Phase 4: region bands (levels 8/11/13 by overlap depth, 3 for the growing selection) with the waveform and baseline cut out in level 0; on the strip as segments (5/7/9) with the rms columns cut out. Marks: 1 px line (level 7, 12 when here), cut-out notches at the band edges when inside a region; flags at y 15–17 (filled = has a note; regions get one at `t0`); dots on the strip at y 54. All of it per column, not per item, and batched by level (`Draw.add`/`Draw.flush`): a screen call per mark cost ~30 µs, 400 marks were 12 ms. Header shows the label of the item here. `V.redraw` no longer calls `screen.update` (the popup goes over it). Phase 3 tape view: header, ruler, loop bar, waveform (peak columns dim, rms core bright; level from per-tape stretched brightness × loudness), playhead, whole-tape strip (rms heights, levels ≤ 11 so 15 means playhead/bracket) with the view bracket. Columns sit on a fixed grid (k·spp) so they don't shimmer while scrolling; recomputed only when the grid moves. Zooms 1/128…300 s/px while narrower than the tape, then "whole" (the playhead travels). Focus dither within 28 px × proxy share. Header messages (`View.message`) e.g. the zoom span |
 | `lib/ui/draw.lua` | Header with page dots (name optionally in tom-thumb); `Draw.columns` fills one level at a time (levels 0–15, 0 cuts out); `Draw.runs` (runs of equal levels → one rect each); `Draw.add`/`Draw.flush` (rects batched per level); dotted lines |
 | `lib/sc/AurTape.sc` | The ring + feeder + transport + proxies (P1/P2 PlayBufs synced to the file position, focus crossfade, lifter cue). One instance per voice (`id`; OSC handlers filter on node id + reply id). Next: output stage (phase 6) |
-| `Engine_Aurotate.sc` | Commands: `open sff` (path, start s, ring s), `ring f`, `rate ff`, `jog_nudge f`, `jog_stop f`, `jump f`, `loop iff`, `amp f`, `fade f`, `proxy iss` (level, tape path, proxy path or ""), `lifter f`, `focus f`, `phase s`. Polls: `aur_pos`, `aur_rate`, `aur_ok`, `aur_misses`, `aur_dur`, `aur_proxies` (bitmask), `aur_proxy_share`. **Never name a command `load`** (collides with `engine.load`) |
+| `Engine_Aurotate.sc` | Phase 6: a group per voice (tape at its head writing to a voice bus, AurOut at its tail); `snd_clear i`, `snd_seg ffffffff`, `snd_commit i`, `snd_glide f`; poll `aur_fx` (bit 1/2: send a/b bus found). Commands: `open sff` (path, start s, ring s), `ring f`, `rate ff`, `jog_nudge f`, `jog_stop f`, `jump f`, `loop iff`, `amp f`, `fade f`, `proxy iss` (level, tape path, proxy path or ""), `lifter f`, `focus f`, `phase s`. Polls: `aur_pos`, `aur_rate`, `aur_ok`, `aur_misses`, `aur_dur`, `aur_proxies` (bitmask), `aur_proxy_share`. **Never name a command `load`** (collides with `engine.load`) |
 | `lib/tape.lua` | Engine glue, transport (play/stop, shuttle steps with detents at 0 and 1×, ±128/256 only with P2, jog ported from `audio.multitape.jog_turn`, `Tape.loop(a, b)` for K1+K2, `toggle_rewind` for Esc), `Tape.on_open` hook (returns the start position from the document), `Tape.hold_open` (startup), proxy budget → `engine.proxy`, params group TAPE (22, now with `aur_rewind`), polls (set `dirty` only when a value changes, so a stopped tape doesn't redraw), reloads `peaks.tmp` every 3 s during the analysis |
 | `lib/analysis.lua` | Cache dir (`<name>-<fnv(path, size, mtime)>`), detached job, 1 s watcher for `done` / `fail` / `progress`, kill on stop |
 | `lib/peaks.lua` | `AURPK2` reader (one string, `string.byte`), `columns(p, t0, t1, w, amp, rms, bright)` picks the coarsest level with ≥ 1 bin per column and reuses the given arrays; reads ≤ 24 bins per column (strided: only matters for level 0 during analysis). Per-tape stats on load: `peak`, `rpeak`, `blo`/`bhi` (5th/95th percentile of rms-weighted brightness); `height`, `rms_height` (normalised, ^0.6), `bright` (stretched). `secs` = seconds covered |
 | `aurotate.lua` | Pages (collection · **tape** · regions · settings; only tape is built), routing of keys/encs (to the popup when one is open), 15 fps metro gated by `Tape.dirty` (also runs `Annot.tick`: K3 hold, parking, debounced saves), K3 with no tape opens `fileselect`. Startup: `params:default()` with `Tape.hold_open`, then the last tape. `params.action_write` flushes the document. Phase 4 globals: `notes_test()`, `dbg.Annot`, `dbg.Popup`, `dbg.Keys`; `dbg_status()` prints a NOTES line. REPL globals: `dbg_status()` (now with redraw ms and heap), `dbg_reset()`, `dbg_shot(name)` (→ `dust/data/aurotate/<name>.png`, 640×384: the 128×64 screen ×4 at offset 64,64), `dbg.Tape`, `dbg.View`, `transport_test`, `clicks_test` |
 | `lib/export.lua` | Phase 5 (md only so far). `Export.markdown(doc, {now, id})` → string, `Export.write(doc, data_dir, id, Store.write_file)` → path. `escape_note`/`unescape_note` for the 5b round trip, `tc`, `hashtag`, `items` (merged order). Pure Lua apart from the mkdir. Triggered by `Annot.export()`: PARAMS > TAPE > `aur_export` (via `Tape.on_export`; group is 23 now) or `export_notes()` in the REPL; header message `EXPORTED NOTES.MD` |
 | `lib/ui/regions.lua` | Phase 5: the regions page (§4.3). The list is `Export.items` filtered by tag, with depths from `Export.parent`, rebuilt only when `Annot.rev` (bumped by `Model.changed` and on tape switch) or the filter changes. Redraw 2.1 ms avg at 1× while following (shield). `dbg_page('regions')` in the REPL |
-| `test/model_test.lua` | Phase 5: + export (61 checks in all). Phase 4: model + store (44 checks: ordering, queries, edge clamps, round trip incl. quotes/newlines/UTF-8, `.bak`, corrupt → `.bak`, newer → read-only and untouched, malformed items dropped, no file for an empty tape, palette, ids). `lua5.3 test/model_test.lua` off the device, `notes_test()` on it |
+| `lib/sound.lua` | Phase 6. Pure: the `snd` fields (`FIELDS`, `DEFAULT`, `MIN`, `MAX`, `STEP`), `get`, `combine` (§3 rules), `segments(doc)`, `insert_send` (dry 0 + a send at 1), `format` for the UI |
+| `lib/region_sound.lua` | Phase 6. Engine glue: `RS.push` sends the segments when they differ from what the engine has (typing a note doesn't resend); `RS.tick` (UI metro) keeps PARAMS > SOUND > *region here* (`aur_cur_*`, not saved in PSETs) mirroring `Model.innermost` at the playhead, and their actions edit it. `send_ok(which)` (engine found the bus, and the fx v2 core, if loaded, has an effect in that send), `warning(r)` (`SILENT`, `GAIN OFF`). Group SOUND (9): `aur_snd` on/off, `aur_snd_glide` |
+| `lib/sc/AurOut.sc` | Phase 6. The output stage (§2.4 as built), segments and re-centring (§3 as built), fx bus lookup |
+| `test/sound.lua`, `tools/sound_check.py` | Phase 6. `sound_test()` records a sine (sine440.wav) through five test regions (removed afterwards), a loop over a boundary, jumps and FF 8×, with reverb and monitor off for the run; the script checks levels per region and lists second-difference spikes |
+| `test/model_test.lua` | Phase 6: + sound (76 checks in all). Phase 5: + export (61 checks in all). Phase 4: model + store (44 checks: ordering, queries, edge clamps, round trip incl. quotes/newlines/UTF-8, `.bak`, corrupt → `.bak`, newer → read-only and untouched, malformed items dropped, no file for an empty tape, palette, ids). `lua5.3 test/model_test.lua` off the device, `notes_test()` on it |
 | `test/transport.lua` | Phase 1 sections (idle, 1×, seeks, FF 2–64×, REW, scrub, loops, parking) plus `analysis` (drops the cache, plays 1× through a fresh analysis) and `cue` (FF/REW 8–256×, far seeks with focus); option `proxy_mb`. Not in the default run. Lines now include `mem_avail_mb`, `covers`, `proxy_max`, `p1`, `p2` (proxy state at the end of the phase) |
 | `tools/aurpeaks.c`, `tools/analyze.sh` | The analysis pass (§2.3) |
 
@@ -662,13 +690,45 @@ Notes are written verbatim, so single line breaks (Shift+Enter) show as
 one paragraph in rendered Markdown; the source keeps them. If that matters,
 end lines with `\` on export and strip it on import.
 
-### 9.1b Next: phase 5 (regions list, reader popup, exports)
-Start from §4.3 and §5. The regions page is the third page dot (placeholder
-in `aurotate.lua`). `Model` already keeps marks and regions sorted; the list
-merges them by `Model.start`. The reader popup can reuse the editor's wrap
-(`lib/ui/popup.lua`, read-only, E2/E3 scroll). Exports go to
-`dust/data/aurotate/exports/<tape>/`; the ids (`m3`, `r12`) are stable for
-the `<!-- aur:r12 -->` round trip.
+**Phase 6 result** (2026-11-20, shield, Pi 3B+, 260616; fx v2 rack loaded):
+
+| | |
+|---|---|
+| `sound_test()` levels (relative to the neutral stretch) | −12.0 dB (gain −12), −153 dB (dry 0), L 0.0 / R −153 dB (pan L), L +6.0 dB (nested gain +6 inside pan L), tone +1 −1.0 dB at 440 Hz, back to 0.0 dB after |
+| boundary timing | mid-crossings of 60, 68, 70, 71 s within 1 ms of each other relative to 64 s; 10–90 % glide 12–15 ms at 50 ms (`Lag` is a 60 dB time) |
+| clicks (second difference, × a clean sine's max) | boundaries, loop 62–66 s (wrap from dry 0 to −12 dB), 7 jumps between differently set places: ≤ 8× (the phase 1 slope kinks were ≤ 6×; a gain step would be ~200×). The 27–61× spots are the FF 8× cue (a 3.5 kHz sine) and the end of the recording |
+| CPU (scsynth avg) | idle 18.9 %, 1× 20.8 %, idle with region sound off 19.0 %; 0 xruns |
+| without the fx mod | not run with the mod disabled; the engine resolves `\FxSetup.asClass` to nil and writes the sends to a private bus (code path, logged `(no fx mod)`) |
+| UI (screenshots) | popup sound rows with `(empty)` and `SILENT` (fx loaded, send a empty), checkered band edges (bottom: sound; top: send-as-insert), ♪ on the regions page, `aur_cur_*` follow the playhead and edit the region (gain −12 → −6 from the param resent the segment) |
+| transport regression | `transport_test(nil, {loops = true, edges = true})` on field_L: every check PASS, 0 misses, 0 xruns, `jump_gain` 0.0; jack CPU 19.3–22.7 % avg |
+
+Decisions made while building it:
+- Only regions with sound make segments, so a document full of plain notes
+  costs the engine nothing; the segment list is resent only when it differs.
+- The popup's sound rows come after in / out; K3 on one resets it. Gain
+  turns down to −40 dB, then one more tick is off.
+- *region here* params are `set_save(false)`: they follow the playhead, and
+  a PSET must not write values into whatever region is under it at load.
+- The first run of `sound_test` had the system reverb (on, on the shield) in
+  the recording, which filled the silences; the test now turns reverb and
+  the input monitor off for the run and restores them.
+
+**Open after phase 6:**
+- **Hands-on by ear**, including send-as-insert with an effect in send a
+  (with the send's tap level at 0), and the glide time.
+- Run once with the fx mod disabled (SYSTEM > MODS) to see the fallback.
+- Pan is a balance on the stereo voice; for mono tapes that is a pan with
+  unity in the middle. A real stereo pan (width) is not there.
+- Tone is a fixed tilt (±9 dB shelves at 250 Hz / 2.5 kHz); if it needs a
+  different character, it is two numbers in `AurOut.addDefs`.
+
+### 9.1b Next: phase 7 (region voices + MIDI triggers)
+Start from §2.4 (region voices) and §2.5 (budgets). A region voice is a
+second AurTape + AurOut pair in its own group (`id` 1..4; the OSC handlers
+already filter on node id + reply id) with a small ring and a head cache;
+AurOut already combines the regions at the voice's own position, so it
+takes `segs` from the same list (make the partition shared, not per voice).
+`rate` (§3, product) is the field still missing from `lib/sound.lua`.
 
 ### 9.2 Test assets on the shield (keep; ~2.3 GB)
 `we@10.0.0.138:~/dust/audio/aurotate-spike/`:

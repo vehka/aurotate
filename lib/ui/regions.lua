@@ -232,9 +232,18 @@ function R.redraw(page, pages)
     else
       text, lev = item.id, 3
     end
+    -- a region with sound settings: a small note glyph before the note dot
+    local right = 122
+    if item.snd then
+      right = 116
+      screen.level(sel and 15 or 8)
+      screen.rect(119, y + 1, 1, 5)
+      screen.rect(117, y + 4, 2, 2)
+      screen.fill()
+    end
     screen.level(lev)
     screen.move(x, y + 6)
-    screen.text(util.trim_string_to_width(text, 122 - x))
+    screen.text(util.trim_string_to_width(text, right - x))
     -- a note to read (beyond what the row shows)
     if item.note:match('%S') then
       screen.level(sel and 15 or 6)

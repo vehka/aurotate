@@ -2,7 +2,7 @@
 -- an audio-anthropology workbench:
 -- hours-long recordings on tape
 --
--- phase 5: regions list, notes export
+-- phase 6: per-region sound
 --
 -- E1 zoom
 -- K1+E1 page
@@ -16,6 +16,10 @@
 -- K1+K3 note popup (or cancel in)
 -- K1+K2 loop the region (or off)
 -- USB keyboard: type a note
+--
+-- region sound: K1+K3 popup rows
+-- (dry, sends, gain, pan, tone),
+-- or PARAMS > SOUND > region here
 --
 -- regions page (K1+E1):
 -- E2 select, E3 tag filter
@@ -34,6 +38,7 @@ local Annot = include 'lib/annot'
 local Popup = include 'lib/ui/popup'
 local Keys = include 'lib/keys'
 local Regions = include 'lib/ui/regions'
+local RS = include 'lib/region_sound'
 
 local st = Tape.st
 local shift = false
@@ -74,6 +79,8 @@ function init()
   Annot.init(Tape, View)
   Popup.init(Tape, Annot)
   Regions.init(Tape, Annot, View)
+  RS.init(Tape, Annot)
+  Popup.sound(RS)
   Keys.init(Tape, Annot, Popup, Regions, function() return not selecting and PAGES[page] or nil end)
   Tape.on_open = function(path, dur)
     Popup.reset()
@@ -81,6 +88,7 @@ function init()
   end
   Tape.on_export = function() Annot.export() end
   Tape.add_params()
+  RS.add_params()
   -- the PSET holds only the tape's path (aur_file); its notes live in the
   -- tape document, saved on their own. Writing a PSET is a good moment to
   -- make sure they are on disk.
@@ -94,8 +102,10 @@ function init()
   if last and util.file_exists(last) then params:set('aur_file', last, true) end
   Tape.open(params:get('aur_file'))
   Tape.start_polls()
+  RS.push(true)
   redraw_metro = metro.init(function()
     Annot.tick()
+    RS.tick()
     if selecting or Popup.modal then return end
     if View.tick() then Tape.dirty = true end
     if Popup.tick() then Tape.dirty = true end
@@ -220,6 +230,9 @@ function dbg_status()
   print(string.format('NOTES %s marks %d regions %d HERE %s PENDING %s POPUP %s',
     doc and Annot.doc_path() or '-', doc and #doc.marks or 0, doc and #doc.regions or 0,
     here and here.id or '-', tostring(st.pending_in), tostring(Popup.kind())))
+  local cur = RS.current()
+  print(string.format('SOUND on %d segments %d FX %d HERE %s',
+    params:get('aur_snd'), #RS.segments(), st.fx, cur and cur.id or '-'))
 end
 
 -- automated transport run; see test/transport.lua
@@ -238,13 +251,19 @@ function export_notes()
   return Annot.export()
 end
 
+-- region sound: records a sine through test regions (test/sound.lua);
+-- check with tools/sound_check.py
+function sound_test(path, only)
+  return include('test/sound').run(Tape, Annot, RS, path, only)
+end
+
 function clicks_test(path)
   return include('test/transport').clicks(Tape, path)
 end
 
 -- REPL handles: dbg.Tape, dbg.View; dbg_shot(name) redraws and saves the
 -- screen to dust/data/aurotate/<name>.png
-dbg = { Tape = Tape, View = View, Annot = Annot, Popup = Popup, Keys = Keys, Regions = Regions }
+dbg = { Tape = Tape, View = View, Annot = Annot, Popup = Popup, Keys = Keys, Regions = Regions, RS = RS }
 -- REPL: dbg_page('regions') shows a page
 function dbg_page(name)
   for i, p in ipairs(PAGES) do

@@ -1,4 +1,5 @@
 // AurTape: a long sound file played through a RAM ring window.
+// (Its output goes to a voice bus; AurOut is the output stage after it.)
 //
 // The file is read in chunks of `chunkSecs` into a ring buffer of `slots`
 // chunks. The voice plays the ring with PlayBuf (double-precision phase, any
@@ -45,6 +46,7 @@ AurTape {
 	var <proxies, proxyReqs, pinflight;
 	var posFunc, okFunc, doneFunc, failFunc, jgFunc;
 	var <st, jumpTime, phaseName = "start", phaseStart;
+	var <posBus; // control: [position s, jump/wrap trigger], for the output stage
 	var <>reportPath;
 
 	*new { |server, target, outBus = 0, ringSecs = 64, id = 0|
@@ -58,7 +60,7 @@ AurTape {
 			jog = 0, nudgeSum = 0, t_jogZero = 0, jogStop = 0.5,
 			loopOn = 0, loopStart = 0, loopEnd = 1, loopStartRing = 0, loopBackFile = 0, loopBackRing = 0,
 			p1buf = 0, p2buf = 0, hasP1 = 0, hasP2 = 0, p1Ratio = 0.125, p2Ratio = 0.015625,
-			p1Nyq = 2700, p2Nyq = 337, lifter = 0.5, focus = 0.15, maxRate = 64|
+			p1Nyq = 2700, p2Nyq = 337, lifter = 0.5, focus = 0.15, maxRate = 64, posOut = 0|
 			// previous blocks: [kpos(n-1), kpos(n-2), jumped(n-1)]
 			var fb = LocalIn.kr(3);
 			var lp = fb[0], lpp = fb[1], jumpedPrev = fb[2];
@@ -138,11 +140,14 @@ AurTape {
 			// starts the jump block from): should be 0 (jump_gain in the report)
 			SendReply.kr(trig, '/aur/jg', [Delay1.kr(gain)], id);
 			Out.ar(out, mix * K2A.ar(gain) * Lag.kr(amp, 0.05));
+			// for the output stage (AurOut): where the tape is, and when it jumped
+			Out.kr(posOut, [kpos / (rateScale * SampleRate.ir), trig]);
 		}).add;
 	}
 
 	prInit {
 		reportPath = "~/dust/data/aurotate/transport_report.txt".standardizePath;
+		posBus = Bus.control(server, 2);
 		this.resetStats;
 		posFunc = OSCFunc({ |msg|
 			if(this.prMine(msg)) {
@@ -246,7 +251,7 @@ AurTape {
 		server.sync;
 		synth = Synth(\aurTape, [
 			\out, outBus, \ring, ring, \valid, valid, \chunkFrames, chunkFrames,
-			\slots, slots, \fileFrames, numFrames, \id, id,
+			\slots, slots, \fileFrames, numFrames, \id, id, \posOut, posBus.index,
 			\rateScale, fileRate / (server.sampleRate ? 48000),
 			\rate, targetRate, \amp, amp, \jogStop, jogStop, \fade, fade, \lifter, lifter, \focus, focus
 		] ++ this.prLoopArgs ++ this.prProxyArgs, target);
@@ -621,5 +626,6 @@ AurTape {
 		this.prFreeServer;
 		proxies.do { |p| p !? { p.buf.free } };
 		proxies = [nil, nil];
+		posBus !? { posBus.free }; posBus = nil;
 	}
 }

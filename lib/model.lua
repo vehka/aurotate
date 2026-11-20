@@ -3,12 +3,15 @@
 --   doc    = { version, tape = { path, size, dur, title, last_pos }, next_id,
 --              marks = { mark... }, regions = { region... } }
 --   mark   = { id = 'm3', t, label, note, tags = {}, created }
---   region = { id = 'r4', t0, t1, label, note, tags = {}, created }
+--   region = { id = 'r4', t0, t1, label, note, tags = {}, created,
+--              snd = { dry, send_a, send_b, gain, pan, tone }? }  (lib/sound.lua)
 --
 -- Pure data, no norns calls, so it can be tested off the device. Lists stay
 -- sorted by time (marks by t, regions by t0). Every change goes through a
 -- function here and calls Model.changed(doc), which the store sets to
 -- schedule a save.
+
+local Sound = include 'lib/sound'
 
 local Model = {}
 
@@ -125,6 +128,24 @@ function Model.move(doc, item, field, t)
   Model.changed(doc)
 end
 
+-- a region's sound field (lib/sound.lua); clamped, and `snd` is dropped
+-- when every field is back at its default
+function Model.set_snd(doc, r, field, v)
+  if Sound.DEFAULT[field] == nil then return end
+  v = Sound.clamp(field, v)
+  if Sound.get(r, field) == v then return end
+  local s = r.snd or {}
+  s[field] = v ~= Sound.DEFAULT[field] and v or nil
+  r.snd = next(s) and s or nil
+  Model.changed(doc)
+end
+
+function Model.reset_snd(doc, r)
+  if not r.snd then return end
+  r.snd = nil
+  Model.changed(doc)
+end
+
 function Model.has_tag(item, tag)
   for _, x in ipairs(item.tags) do
     if x == tag then return true end
@@ -212,6 +233,19 @@ Model.migrations = {}
 local function str(x) return type(x) == 'string' and x or '' end
 local function num(x) return type(x) == 'number' and x == x and x ~= math.huge and x ~= -math.huge end
 
+local function clean_snd(snd)
+  if type(snd) ~= 'table' then return nil end
+  local out = {}
+  for _, f in ipairs(Sound.FIELDS) do
+    local v = snd[f]
+    if num(v) then
+      v = Sound.clamp(f, v)
+      if v ~= Sound.DEFAULT[f] then out[f] = v end
+    end
+  end
+  return next(out) and out or nil
+end
+
 local function clean_tags(tags)
   local out, seen = {}, {}
   if type(tags) == 'table' then
@@ -266,7 +300,8 @@ function Model.validate(t)
     local id = type(r) == 'table' and take_id(r.id, 'r')
     if id and num(r.t0) and num(r.t1) and r.t1 > r.t0 then
       doc.regions[#doc.regions + 1] = { id = id, t0 = math.max(0, r.t0), t1 = r.t1, label = str(r.label),
-        note = str(r.note), tags = clean_tags(r.tags), created = num(r.created) and r.created or nil }
+        note = str(r.note), tags = clean_tags(r.tags), created = num(r.created) and r.created or nil,
+        snd = clean_snd(r.snd) }
     else
       dropped = dropped + 1
     end
