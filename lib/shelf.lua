@@ -5,6 +5,8 @@
 --   relink   a tape whose file moved: find it by name and size under
 --            dust/audio, move its notes and analysis cache along
 --   forget   drop a tape from the list (its notes stay on disk)
+--   delete   a downloaded tape (in dust/audio/aurotate/): the file, its
+--            .source.txt, its notes, its analysis cache and its entry
 --   hint     on opening a single file: does the next file continue it?
 --
 -- Glue over Collection, Store, Reel and Analysis; the UI is
@@ -155,6 +157,40 @@ function Shelf.forget(e)
   if Tape.st.path == e.path then return false end
   Collection.remove(e.path)
   Collection.flush()
+  return true
+end
+
+-- a tape this script downloaded: it has a source and lives in
+-- dust/audio/aurotate/. Only these can be deleted from the device; your own
+-- recordings can only be forgotten.
+function Shelf.deletable(e, src)
+  local dl = _path.audio .. 'aurotate/'
+  return src ~= nil and not Reel.is(e.path) and e.path:sub(1, #dl) == dl
+    and not e.path:find('/%.%./') and not e.path:find('/%./')
+end
+
+-- delete a downloaded tape for good. Returns true, or nil and why.
+function Shelf.delete(e, src)
+  if Tape.st.path == e.path then return nil, 'it is open' end
+  if not Shelf.deletable(e, src) then return nil, 'not a download' end
+  -- the cache as recorded, and as it would be named now (before the file goes)
+  local caches = { e.cache }
+  if Shelf.exists(e.path) then caches[#caches + 1] = Analysis.cache_dir(e.path) end
+  local cache_root = norns.state.data .. 'cache/'
+  for _, c in ipairs(caches) do
+    if type(c) == 'string' and c:sub(1, #cache_root) == cache_root and #c > #cache_root
+      and not c:find('/%.%.') then
+      os.execute('rm -rf ' .. q(c:gsub('/$', '')))
+    end
+  end
+  os.remove(e.path)
+  os.remove(e.path .. '.source.txt')
+  local doc = Store.path_of(e.path)
+  os.remove(doc)
+  os.remove(doc .. '.bak')
+  Collection.remove(e.path)
+  Collection.flush()
+  if Shelf.exists(e.path) then return nil, 'the file is still there' end
   return true
 end
 

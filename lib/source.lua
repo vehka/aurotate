@@ -297,15 +297,18 @@ function Source.sidecar(src)
   return table.concat(o, '\n')
 end
 
--- the first note of a Freesound tape: label and note text
+-- the first note of a Freesound tape: label, note text and tags (Freesound's
+-- tags become the mark's aurotate tags, so the tape's tag picker and the
+-- regions filter offer them; the palette in tags.lua stays as it is)
 function Source.first_note(src)
   local fs = src.freesound
   if not fs then return nil end
   local parts = {}
   if fs.description ~= '' then parts[#parts + 1] = fs.description end
-  if #fs.tags > 0 then parts[#parts + 1] = 'tags: ' .. table.concat(fs.tags, ' ') end
   parts[#parts + 1] = Source.credit(src)
-  return fs.name, table.concat(parts, '\n\n')
+  local tags = {}
+  for i, t in ipairs(fs.tags) do tags[i] = t end
+  return fs.name, table.concat(parts, '\n\n'), tags
 end
 
 ---- validation (Model.validate)

@@ -109,16 +109,22 @@ converted to FLAC at 48 kHz (ogg, aif with sox; mp3 and m4a need ffmpeg,
 which the script offers to install). Next to each file is
 `<file>.source.txt` with the credit line and where it came from, and the
 tape's notes know it too: the tape popup and `notes.md` give the credit
-(marking non-commercial licenses). A Freesound sound's description and tags
-become its first note, a mark at 0:00.
+(marking non-commercial licenses). A Freesound sound's description becomes
+its first note, a mark at 0:00, and its Freesound tags become that mark's
+tags: the tape's tag picker and the regions filter offer them. A downloaded
+tape can be deleted from the device: the tape popup's *delete* row (K3
+twice) removes the file, its `.source.txt`, its notes and its analysis.
+Only downloads (in `dust/audio/aurotate/`) have it; your own recordings can
+only be forgotten.
 
 **Freesound** needs your own API credentials, once: log in at
 freesound.org and apply at https://freesound.org/apiv2/apply. Put the
 *client id* and the *client secret* (the API key) into the add popup's
 *client id* and *api key* rows, or into `dust/data/aurotate/freesound.lua`:
 `return { api_key = '…', client_id = '…' }`. With the key alone you get the
-sound's **preview** (an ogg, good enough to listen and annotate; the tape
-says `(preview)`). For the **original file**, log in: *login* (K3) writes a
+sound's **preview**: the whole sound, but as a lossy ogg (about 190 kbit/s)
+instead of the uploaded file. Good enough to listen and annotate; the
+tape says `(preview)`, and its `.source.txt` gives the original's format. For the **original file**, log in: *login* (K3) writes a
 link to `dust/data/aurotate/freesound_login.txt` (and prints it in maiden);
 open it on a computer or phone, allow access, and type the code Freesound
 shows into the text entry that opened (within 10 minutes; maiden:

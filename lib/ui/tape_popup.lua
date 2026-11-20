@@ -16,6 +16,8 @@
 --   author, license   a tape from a plain URL: K3 type them (Freesound
 --              tapes know theirs)
 --   forget     K3 twice: drop it from the list (its notes stay on disk)
+--   delete     a downloaded tape (dust/audio/aurotate/): K3 twice deletes
+--              the file, its .source.txt, its notes and its analysis
 --
 -- K2 closes (a changed start time is saved then).
 
@@ -85,6 +87,7 @@ local function rows_for(l)
     rows[#rows + 1] = 'join'
   end
   rows[#rows + 1] = 'forget'
+  if Shelf.deletable(l.e, l.source) then rows[#rows + 1] = 'delete' end
   return rows
 end
 
@@ -161,6 +164,10 @@ local function row_value(l, name)
     return l.found_i .. '/' .. #l.found .. ' ' .. l.found[l.found_i]:sub(#_path.audio + 1)
   end
   if name == 'forget' then return l.confirm == 'forget' and 'K3 again' or '' end
+  if name == 'delete' then
+    if Tape.st.path == e.path then return 'open another tape first' end
+    return l.confirm == 'delete' and 'K3 again' or 'file + notes'
+  end
   if name == 'source' then
     local fs = l.source.freesound
     return (l.source.author or '?') .. ((fs and fs.file and fs.file ~= 'original') and ' (preview)' or '')
@@ -224,6 +231,8 @@ function TP.redraw()
     right = name_of(l.cands[l.join_n + 1].path):upper()
   elseif name == 'source' then
     right = Source.license_short(l.source.license) or 'NO LICENSE'
+  elseif name == 'delete' then
+    right = 'NO UNDO'
   end
   Popup.title('TAPE', right)
   local top = util.clamp(l.row - G.NROWS + 1, 1, math.max(1, #l.rows - G.NROWS + 1))
@@ -367,6 +376,17 @@ function TP.key(n, z, shift)
       TP.on_done(ok and 'FORGOTTEN' or 'IT IS OPEN')
     else
       l.confirm = 'forget'
+    end
+  elseif name == 'delete' then
+    if Tape.st.path == l.e.path then
+      TP.on_done('OPEN ANOTHER TAPE FIRST')
+    elseif l.confirm == 'delete' then
+      local ok, err = Shelf.delete(l.e, l.source)
+      layer = nil
+      if not ok then print('aurotate: delete failed: ' .. tostring(err)) end
+      TP.on_done(ok and 'DELETED' or ('DELETE: ' .. tostring(err)):upper())
+    else
+      l.confirm = 'delete'
     end
   end
   Tape.dirty = true

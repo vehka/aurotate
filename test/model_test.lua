@@ -474,8 +474,9 @@ function T.run(dir)
   local side = Source.sidecar(src)
   check('sidecar', side:find('^"harbour wind.wav" by fieldrec') and side:find('freesound file: preview-hq-ogg', 1, true)
     and side:find('tags: wind harbour field-recording', 1, true) and side:find('original: wav, 44100 Hz, 2 ch', 1, true))
-  local label, note = Source.first_note(src)
-  check('first note', label == 'harbour wind.wav' and note:find('^Wind at the harbour') and note:find('tags: wind', 1, true)
+  local label, note, ftags = Source.first_note(src)
+  check('first note', label == 'harbour wind.wav' and note:find('^Wind at the harbour') and not note:find('tags:', 1, true)
+    and table.concat(ftags, ',') == table.concat(src.freesound.tags, ',') and ftags ~= src.freesound.tags
     and note:find('Attribution 4.0', 1, true))
   -- validate keeps the source, drops a bad one
   local sd = Model.new('/x/fs.flac', 30, 1)

@@ -257,10 +257,10 @@ local function finish(job, src, stem)
   doc.tape.dur, doc.tape.size = dur, size
   doc.tape.source = Source.clean(src)
   if src.title then doc.tape.title = Source.title(src.title) end
-  local label, note = Source.first_note(doc.tape.source)
+  local label, note, tags = Source.first_note(doc.tape.source)
   if label and #doc.marks == 0 then
     local m = Model.add_mark(doc, 0, os.time())
-    m.label, m.note = label, note
+    m.label, m.note, m.tags = label, note, tags
   end
   local wok, werr = Store.put(path, doc)
   if not wok then print('aurotate: notes for the download not saved: ' .. tostring(werr)) end

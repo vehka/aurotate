@@ -676,8 +676,17 @@ cancelled download leaving no partial file, and the analysis of the result.
 - Packs: later; when they come, one tape per sound.
 - Folders: Freesound downloads go to `dust/audio/aurotate/freesound/`,
   plain URLs to `dust/audio/aurotate/` itself.
-- A Freesound tape's description (and its tags, as text) becomes a first
-  note: a mark at 0:00 labelled with the sound's name.
+- A Freesound tape's description becomes a first note: a mark at 0:00
+  labelled with the sound's name. Its Freesound tags become that mark's
+  aurotate tags (after the hands-on, 2026-11-20; first built as text in the
+  note), so the tape's tag picker and the regions filter offer them; the
+  palette in `tags.lua` doesn't grow.
+- **Delete** (after the hands-on, 2026-11-20): the tape popup has a *delete*
+  row for downloaded tapes only (a source, under `dust/audio/aurotate/`, not
+  a reel): K3 twice removes the file, `.source.txt`, the document (+ `.bak`),
+  the analysis cache and the entry (`Shelf.delete`). Not while the tape is
+  open. Own recordings keep only *forget*. A preview is replaced this way:
+  download the original, delete the preview.
 
 ✅ **Built (phase 9, 2026-11-20)** as planned, with these differences:
 - **No openssl:** SHA-256 and base64url are pure Lua (`lib/pkce.lua`, checked
@@ -1044,7 +1053,7 @@ on the desktop over the LAN, so no real Freesound account was used):
 | `lua5.3 test/model_test.lua`, `notes_test()` | 169 / 169 (phase 8: 110): JSON, SHA-256 / PKCE (RFC 7636 B), requests, names, headers, sniff, licenses, a sound-instance fixture → source, credit, sidecar, first note, validate, `set_source`, export, collection author/license, the token store (mode 600, pending 10 min, expiry, refresh rotation, same key keeps the login) |
 | URL: WAV, mp3, redirect, Content-Disposition | WAV kept as is; mp3 → FLAC 48 kHz (ffmpeg); final URL after the redirect in the sidecar; `"Field Take 1.WAV"` → `Field_Take_1.wav`; a second copy → `tone-2.wav` |
 | URL: HTML page, 404 | `not audio (html)`, `not found (404)`; nothing left behind |
-| Freesound, key only | metadata + `preview-hq-ogg` → FLAC 48 kHz stereo, document with `source` and the first note (description with the HTML stripped, tags, credit), sidecar; an unknown id: `no sound 999` |
+| Freesound, key only | metadata + `preview-hq-ogg` → FLAC 48 kHz stereo, document with `source` and the first note (description with the HTML stripped and the credit; the Freesound tags as the mark's tags), sidecar; an unknown id: `no sound 999` |
 | login | the link in `freesound_login.txt`; a wrong code refused (`bad code or verifier`); the code pasted as the whole redirect URL accepted; the mock checked `S256(verifier)` against the challenge; the file is removed after |
 | original, refresh, revoke | original aif → FLAC; with `expires` in the past: refreshed first, the new refresh token in `freesound.lua` at once; revoked: 401 → tokens cleared, `log in again`, falls back to the preview |
 | cancel | a slow 77 MB download cancelled at 2 %: curl gone, no temp folder |
