@@ -4,7 +4,8 @@ An audio-anthropology workbench for norns: play recordings hours long on an
 analog-feeling tape, mark and annotate them, and give regions their own
 sound. Work in progress; see `docs/PLAN.md`.
 
-Current state: **phase 4, marks, regions and notes.** A SuperCollider engine streams
+Current state: **phase 5 in progress**: marks, regions and notes (phase 4),
+the **regions list** with a reader, and **notes export as Markdown**. A SuperCollider engine streams
 the file from disk through a RAM ring window, so length is limited by disk,
 not RAM. When a tape is opened for the first time it is analysed in the
 background (about 1 minute per 2 hours on a Pi 3; the tape plays meanwhile).
@@ -30,6 +31,22 @@ their own, in `dust/data/aurotate/tapes/` (not in PSETs), a couple of seconds
 after each edit; the previous save is kept as `.bak`. The script reopens the
 tape you had open last, where you left it.
 
+The **regions page** (K1+E1 to the third dot) lists every mark and region
+in tape order, nested regions indented. It follows the playhead until you
+pick something with E2; a bar at the left edge marks what the playhead is
+in. E3 filters by tag. K3 jumps the tape there, K1+K3 opens the reader (the
+whole note, E2/E3 scroll; K3 there edits, K1+K2 loops the region), K1+K2
+loops the selected region, K2 plays / stops. On a USB keyboard Up/Down,
+PgUp/PgDn and Home/End select, Enter jumps; the transport hotkeys work as on
+the tape page.
+
+**Export:** PARAMS > TAPE > *export notes (md)* writes
+`dust/data/aurotate/exports/<tape>/notes.md` (reach it over SMB or `scp`):
+one section per mark and region in tape order, with its times, label,
+enclosing region, tags (as `#hashtags`) and note. The previous export is kept
+as `notes.md.bak`. The `<!-- aur:m3 -->` lines tie each section to its mark or
+region, for reading edits back in later; leave them as they are.
+
 ## Requirements
 
 - norns 3.x (developed on the 260616 beta; Pi 3 and Pi 4)
@@ -53,6 +70,8 @@ tape you had open last, where you left it.
 | K1+K3 | open the mark or region under the playhead (label, note, tags, times, delete); with a region in pending: cancel it |
 | K1+K2 | loop the region under the playhead; again: loop off |
 | K3 with no tape | choose one |
+
+The regions page has its own keys; see above.
 
 In the popup: E2 picks a row, E3 changes it (tags: step through the palette,
 K3 toggles; in / out / time: 0.1 s a tick, 1 s with K1, and the tape jumps
@@ -90,6 +109,7 @@ notes_test()            -- marks/regions store (also off the device: lua5.3 test
 transport_test()        -- ~8 min; results in dust/data/aurotate/transport_*.txt
 transport_test(nil, {analysis = true, cue = true})  -- fresh analysis while playing; cue speeds
 clicks_test()           -- records the output while seeking/looping a sine
+export_notes()          -- same as PARAMS > TAPE > export notes (md)
 dbg_status()            -- transport state, redraw time and Lua heap
 dbg_shot('name')        -- screenshot to dust/data/aurotate/name.png
 ```

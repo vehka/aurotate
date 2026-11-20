@@ -147,6 +147,43 @@ function T.run(dir)
   -- the id: same name, other folder → other document
   check('ids differ', Store.id('/a/x.wav') ~= Store.id('/b/x.wav'))
 
+  -- markdown export
+  local Export = include 'lib/export'
+  check('tc short', Export.tc(83.45, false) == '1:23', Export.tc(83.45, false))
+  check('tc long ms', Export.tc(3723.0456, true, true) == '1:02:03.046', Export.tc(3723.0456, true, true))
+  check('tc carry', Export.tc(59.9996, false, true) == '1:00.000', Export.tc(59.9996, false, true))
+  check('hashtag', Export.hashtag('story') == '#story' and Export.hashtag('two words') == '#[[two words]]')
+  local tricky = '# not a heading\n  <!-- aur:m1 -->\n\\# already\nplain #tag'
+  local esc = Export.escape_note(tricky)
+  check('escape', esc == '\\# not a heading\n  \\<!-- aur:m1 -->\n\\\\# already\nplain #tag', esc)
+  check('unescape round trip', Export.unescape_note(esc) == tricky, Export.unescape_note(esc))
+  local e = Model.new('/x/talk.flac', 4000, 1)
+  local outer_r = Model.add_region(e, 100, 400)
+  Model.set(e, outer_r, 'label', 'arrival')
+  local inner_r = Model.add_region(e, 150, 160)
+  local em = Model.add_mark(e, 155)
+  Model.set(e, em, 'note', 'she says "yes"\n\n# not a heading\n')
+  Model.toggle_tag(e, em, 'story')
+  local early = Model.add_mark(e, 100) -- same start as the region: after it
+  local at_end = Model.add_mark(e, 400) -- the end is outside the region
+  local md = Export.markdown(e, { now = 0, id = 'talk-1234' })
+  local order = {}
+  for id in md:gmatch('<!%-%- aur:([mr]%d+) %-%->') do order[#order + 1] = id end
+  check('md order', table.concat(order, ',') == table.concat({ outer_r.id, early.id, inner_r.id, em.id, at_end.id }, ','),
+    table.concat(order, ','))
+  check('md tape id', md:find('<!-- aur:tape talk-1234 -->', 1, true) ~= nil)
+  check('md region heading', md:find('## 0:01:40–0:06:40 · arrival\n', 1, true) ~= nil)
+  check('md mark meta', md:find('`' .. em.id .. '` · mark 0:02:35.000 · in `' .. inner_r.id .. '` · #story', 1, true) ~= nil)
+  check('md nested region', md:find('in arrival (`' .. outer_r.id .. '`)', 1, true) ~= nil)
+  check('md end exclusive', not md:find('mark 0:06:40.000 · in', 1, true))
+  check('md note escaped', md:find('\n\\# not a heading\n', 1, true) ~= nil)
+  check('md no stray headings', select(2, md:gsub('\n## ', '')) == 5)
+  check('md empty', Export.markdown(Model.new('/x/e.wav', 10, 1), { now = 0 }):find('No marks', 1, true) ~= nil)
+  local p_md = Export.write(e, dir, 'talk-1234', Store.write_file, 0)
+  Export.write(e, dir, 'talk-1234', Store.write_file, 0)
+  check('md written', p_md and io.open(p_md) ~= nil)
+  check('md bak', p_md and io.open(p_md .. '.bak') ~= nil)
+
   print(string.format('model_test: %d passed, %d failed', passes, fails))
   if fails == 0 then rm_rf(dir) end
   return fails

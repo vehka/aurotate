@@ -1,4 +1,4 @@
-# aurotate: implementation plan (draft 6, after phase 4)
+# aurotate: implementation plan (draft 7, phase 5 in progress)
 
 An audio-anthropology workbench for norns: play recordings hours long on an
 analog-feeling tape, mark points and regions, attach notes and per-region
@@ -281,6 +281,16 @@ joined** (§6.1).
   and scrollable with E2/E3, plus tags. Read it while the region plays on
   loop.
 - Filter by tag.
+- ✅ Built (2026-11-20, `lib/ui/regions.lua`): 7 rows in tom-thumb, region =
+  square, mark = tick, indented 3 px per enclosing region (max 4), a dot at
+  the right when there is a note; the row shows the label, else the note's
+  first line, else the id. The selection follows the playhead (last item
+  started before it, or "here") until E2 turns; K3 / re-entering the page
+  follows again. E3 cycles all → each tag. K1+K2 loops the selected region
+  (`Annot.loop_item`; again: off). The reader is a popup kind (`reader`):
+  label, tags, note; E2 line, E3 page, K3 the item popup (K2 comes back),
+  K1+K2 loop. Popups close on a page change. No ♪ / MIDI columns yet
+  (phases 6–7).
 
 ### 4.4 Settings
 Budgets, cue/lifter character, transcription rewind, display (offset or
@@ -341,9 +351,22 @@ wall-clock), MIDI channel and mapping mode, and export.
 
 ## 5. Export / import (lib/export.lua)
 Write to `_path.data/aurotate/exports/<tape>/`:
-- `notes.md`: one section per mark/region, with timecode (offset and
-  wall-clock), label, tags and note. Phase 5b: **re-import** edits to the
-  notes from this file, matched by id comment `<!-- aur:r12 -->`.
+- `notes.md` ✅ (2026-11-20): one section per mark/region, with timecode
+  (offset; wall-clock in phase 8), label, tags and note. Phase 5b: **re-import** edits to the
+  notes from this file, matched by id comment `<!-- aur:r12 -->`. Format, as
+  built:
+  ```
+  ## 0:01:40–0:06:40 · arrival story        heading: start(–end) · label
+  <!-- aur:r1 -->                            the id; the re-import key
+  `r1` · region 0:01:40.000–0:06:40.000 (5:00) · in … (`r0`) · #story
+                                             exact times, enclosing region, tags
+  note, verbatim (lines starting with # or <!-- get a leading \)
+  ```
+  Items in tape order (a region before the marks inside it, a longer region
+  before a shorter one at the same start). `H:MM:SS` for tapes ≥ 1 h, else
+  `M:SS`. Tags as `#tag`, or `#[[two words]]` when not a plain word. The file
+  header has the path, length, counts, all tags, export time and
+  `<!-- aur:tape <id> -->`. A new export keeps the old one as `.bak`.
 - `labels.txt`: Audacity label track (`t0\tt1\tlabel`).
 - `notes.vtt`: WebVTT, to subtitle the recording in a video or web player.
 - `regions.csv`: for spreadsheets / ELAN-adjacent workflows.
@@ -391,7 +414,7 @@ Write to `_path.data/aurotate/exports/<tape>/`:
 | 2 | ✅ **Analysis + cache** (2026-11-19, Pi 3; see §9.1): `aurpeaks` + sox in one pass, P1/P2, reduced levels; proxy crossfade, lifter cue, focus on far seeks, shuttle to ±256× | done: CPU at 8–256× recorded (§9.3), far seeks covered by the proxy, analysis during playback without xruns; hands-on on the device: "great" (user, 2026-11-19) |
 | 3 | ✅ **Tape view UI** (2026-11-19, Pi 3; see §9.1): zoomed view + whole-tape strip, ruler, zoom, waveform from the raw peaks string, page dots, growing waveform during analysis, focus dither | done: reads well at every zoom (screenshots, `field_L`), redraw 5.5 ms avg at 1×, 8.5 ms at FF 64× (15 fps, no drawing in polls), Lua heap 3.9 MB after GC; hands-on on the device: "works great" (user, 2026-11-20) |
 | 4 | ✅ **Marks, regions, notes** (2026-11-20, Pi 3; see §9.1): model + tape document store, K3 tap/hold gestures, region bands and mark flags, item popup and note editor, USB keyboard notes and hotkeys | done: annotations survive a script reload, a reboot and PSET switches between two tapes (each with its own notes and position); off-device and on-device store tests pass. Hands-on on the device still to do |
-| 5 | Regions list + reader popup, exports (md, Audacity, VTT, CSV), excerpts | export opens correctly in Audacity and a VTT player |
+| 5 | ✅ Regions list + reader popup (2026-11-20); exports: ✅ md, Audacity / VTT / CSV still to do; excerpts still to do | export opens correctly in Audacity and a VTT player |
 | 6 | Per-region sound: output stage, fx v2 sends, send-as-insert, boundary glides, current-region params | regions change sound at boundaries without clicks; works without the fx mod |
 | 7 | Region voices + MIDI triggers (note→region mapping and learn, choke groups, one-shot/gate/loop modes) | 4-voice polyphony from MIDI with instant attack |
 | 8 | Collection view, split-file reels, wall-clock time | — |
@@ -447,7 +470,9 @@ lib/ui/regions.lua  settings.lua  popup.lua
 | `lib/analysis.lua` | Cache dir (`<name>-<fnv(path, size, mtime)>`), detached job, 1 s watcher for `done` / `fail` / `progress`, kill on stop |
 | `lib/peaks.lua` | `AURPK2` reader (one string, `string.byte`), `columns(p, t0, t1, w, amp, rms, bright)` picks the coarsest level with ≥ 1 bin per column and reuses the given arrays; reads ≤ 24 bins per column (strided: only matters for level 0 during analysis). Per-tape stats on load: `peak`, `rpeak`, `blo`/`bhi` (5th/95th percentile of rms-weighted brightness); `height`, `rms_height` (normalised, ^0.6), `bright` (stretched). `secs` = seconds covered |
 | `aurotate.lua` | Pages (collection · **tape** · regions · settings; only tape is built), routing of keys/encs (to the popup when one is open), 15 fps metro gated by `Tape.dirty` (also runs `Annot.tick`: K3 hold, parking, debounced saves), K3 with no tape opens `fileselect`. Startup: `params:default()` with `Tape.hold_open`, then the last tape. `params.action_write` flushes the document. Phase 4 globals: `notes_test()`, `dbg.Annot`, `dbg.Popup`, `dbg.Keys`; `dbg_status()` prints a NOTES line. REPL globals: `dbg_status()` (now with redraw ms and heap), `dbg_reset()`, `dbg_shot(name)` (→ `dust/data/aurotate/<name>.png`, 640×384: the 128×64 screen ×4 at offset 64,64), `dbg.Tape`, `dbg.View`, `transport_test`, `clicks_test` |
-| `test/model_test.lua` | Phase 4: model + store (44 checks: ordering, queries, edge clamps, round trip incl. quotes/newlines/UTF-8, `.bak`, corrupt → `.bak`, newer → read-only and untouched, malformed items dropped, no file for an empty tape, palette, ids). `lua5.3 test/model_test.lua` off the device, `notes_test()` on it |
+| `lib/export.lua` | Phase 5 (md only so far). `Export.markdown(doc, {now, id})` → string, `Export.write(doc, data_dir, id, Store.write_file)` → path. `escape_note`/`unescape_note` for the 5b round trip, `tc`, `hashtag`, `items` (merged order). Pure Lua apart from the mkdir. Triggered by `Annot.export()`: PARAMS > TAPE > `aur_export` (via `Tape.on_export`; group is 23 now) or `export_notes()` in the REPL; header message `EXPORTED NOTES.MD` |
+| `lib/ui/regions.lua` | Phase 5: the regions page (§4.3). The list is `Export.items` filtered by tag, with depths from `Export.parent`, rebuilt only when `Annot.rev` (bumped by `Model.changed` and on tape switch) or the filter changes. Redraw 2.1 ms avg at 1× while following (shield). `dbg_page('regions')` in the REPL |
+| `test/model_test.lua` | Phase 5: + export (61 checks in all). Phase 4: model + store (44 checks: ordering, queries, edge clamps, round trip incl. quotes/newlines/UTF-8, `.bak`, corrupt → `.bak`, newer → read-only and untouched, malformed items dropped, no file for an empty tape, palette, ids). `lua5.3 test/model_test.lua` off the device, `notes_test()` on it |
 | `test/transport.lua` | Phase 1 sections (idle, 1×, seeks, FF 2–64×, REW, scrub, loops, parking) plus `analysis` (drops the cache, plays 1× through a fresh analysis) and `cue` (FF/REW 8–256×, far seeks with focus); option `proxy_mb`. Not in the default run. Lines now include `mem_avail_mb`, `covers`, `proxy_max`, `p1`, `p2` (proxy state at the end of the phase) |
 | `tools/aurpeaks.c`, `tools/analyze.sh` | The analysis pass (§2.3) |
 
@@ -623,6 +648,19 @@ Decisions made while building it (see also §8):
 - Popup and editor have no K1+E1 page change (E1 still zooms behind them).
 - The tom-thumb font lacks some punctuation (– …); ASCII and Latin-1 letters
   are fine.
+
+**Phase 5 so far: Markdown export, regions list, reader** (2026-11-20,
+shield): 61/61 checks on and off the device; PARAMS trigger on test3h writes
+the file (UTF-8, escaped `#` line, marks inside a region say so) and the
+header confirms it. Regions page driven from the REPL (screenshots): follow,
+E2, tag filter, K3 jump, K1+K2 loop on/off from list and reader, reader
+scroll, reader → item popup → back, keyboard Down/Enter; redraw 2.1 ms avg.
+Hands-on still to do. Still to do in phase 5: Audacity / VTT / CSV, excerpts.
+- REPL note: `nrepl.py` sends each line as its own chunk, so locals don't
+  survive a newline; put a multi-step setup on one line.
+Notes are written verbatim, so single line breaks (Shift+Enter) show as
+one paragraph in rendered Markdown; the source keeps them. If that matters,
+end lines with `\` on export and strip it on import.
 
 ### 9.1b Next: phase 5 (regions list, reader popup, exports)
 Start from §4.3 and §5. The regions page is the third page dot (placeholder

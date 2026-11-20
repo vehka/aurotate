@@ -1,12 +1,15 @@
 -- popup: layers over the tape view (docs/PLAN.md §4): 112×52 px, a 1 px bright
 -- frame, the screen behind dimmed
 --
--- Two kinds:
+-- Three kinds:
 --   item    the mark or region under the playhead: label, note, tags, times,
 --           delete. E2 row, E3 value, K3 edit, K2 close.
 --   editor  a note, word-wrapped, with a cursor. Typed on a USB keyboard
 --           (lib/keys.lua sends the keys here); on the device K3 opens
 --           textentry with the whole note. K2 close.
+--   reader  a mark or region to read (the regions page): label, tags and the
+--           whole note, word-wrapped. E2 line, E3 page, K3 edit (the item
+--           popup), K1+K2 loop the region, K2 close.
 
 local textentry = require 'textentry'
 -- the same Model and Store instances as lib/annot (include runs a file anew
@@ -45,11 +48,8 @@ function P.item() return layer and layer.item end
 function P.layer() return layer end
 
 function P.close()
-  if layer and layer.kind == 'editor' and layer.back then
-    layer = layer.back -- back to the item popup it came from
-  else
-    layer = nil
-  end
+  -- back to the popup it came from (editor → item → reader)
+  layer = layer and layer.back or nil
   Tape.dirty = true
 end
 
@@ -295,12 +295,74 @@ local function draw_editor(l)
   end
 end
 
+-- the reader's text: label, tags, then the note; returns the text and the
+-- byte ranges of the label and the tags (drawn at other levels)
+local function reader_text(item)
+  local parts, label_end, tags_from, tags_to = {}, 0, 0, -1
+  if item.label ~= '' then
+    parts[#parts + 1] = item.label:gsub('\n', ' ')
+    label_end = #parts[1]
+  end
+  if #item.tags > 0 then
+    local h = {}
+    for i, tag in ipairs(item.tags) do h[i] = '#' .. tag end
+    local s = table.concat(h, ' ')
+    local before = #table.concat(parts, '\n')
+    tags_from = before + (#parts > 0 and 2 or 1)
+    tags_to = tags_from + #s - 1
+    parts[#parts + 1] = s
+  end
+  if #parts > 0 then parts[#parts + 1] = '' end
+  local note = item.note:gsub('%s+$', '')
+  parts[#parts + 1] = note ~= '' and note or '(no note)'
+  return table.concat(parts, '\n'), label_end, tags_from, tags_to, note == ''
+end
+
+local function draw_reader(l)
+  local item = l.item
+  local right = Model.is_region(item) and (hms(item.t0) .. ' ' .. fmt_len(item.t1 - item.t0)) or hms(item.t)
+  title((Model.is_region(item) and 'R ' or 'M ') .. item.id, right)
+  text_font()
+  local text, label_end, tags_from, tags_to, empty = reader_text(item)
+  local lines = wrap(text)
+  l.nlines = #lines
+  l.scroll = util.clamp(l.scroll, 1, math.max(1, #lines - LINES + 1))
+  for i = 0, LINES - 1 do
+    local ln = lines[l.scroll + i]
+    if not ln then break end
+    if ln[1] <= label_end then
+      screen.level(15)
+    elseif ln[1] >= tags_from and ln[1] <= tags_to + 1 then
+      screen.level(6)
+    elseif empty and ln[1] > math.max(label_end, tags_to) then
+      screen.level(4)
+    else
+      screen.level(11)
+    end
+    screen.move(TX, LINES_Y + i * LINE_H)
+    screen.text(text:sub(ln[1], ln[2]))
+  end
+  if #lines > LINES then
+    screen.level(4)
+    local h = math.max(3, math.floor((H - 14) * LINES / #lines))
+    local y0 = Y + 13 + math.floor((H - 14 - h) * (l.scroll - 1) / (#lines - LINES))
+    screen.rect(X + W - 3, y0, 1, h)
+    screen.fill()
+  end
+end
+
 function P.redraw()
   if not layer then return end
   screen.font_face(1)
   screen.font_size(8)
   frame_box()
-  if layer.kind == 'item' then draw_item(layer) else draw_editor(layer) end
+  if layer.kind == 'item' then
+    draw_item(layer)
+  elseif layer.kind == 'reader' then
+    draw_reader(layer)
+  else
+    draw_editor(layer)
+  end
 end
 
 -- the editor's cursor blinks; returns true when a redraw is wanted
@@ -322,7 +384,14 @@ end
 
 ---- opening
 
-function P.open_item(item)
+function P.open_reader(item)
+  if not item then return end
+  layer = { kind = 'reader', item = item, scroll = 1, nlines = 0 }
+  Tape.dirty = true
+end
+
+-- back: the popup to return to on close (the reader)
+function P.open_item(item, back)
   local doc = Store.doc()
   if not doc or not item then return end
   local pal = Store.palette()
@@ -332,7 +401,7 @@ function P.open_item(item)
     if not seen[t] then pal[#pal + 1] = t end
   end
   layer = { kind = 'item', item = item, rows = item_rows(item), row = 1, top = 1,
-    palette = pal, tag_i = 1, confirm = false }
+    palette = pal, tag_i = 1, confirm = false, back = back }
   Tape.dirty = true
 end
 
@@ -429,6 +498,17 @@ end
 function P.key(n, z, shift)
   local l = layer
   if not l or z == 0 then return end
+  if l.kind == 'reader' then
+    if n == 2 and shift then
+      if Model.is_region(l.item) then Annot.loop_item(l.item) end
+    elseif n == 2 then
+      P.close()
+    elseif n == 3 then
+      P.open_item(l.item, l)
+    end
+    Tape.dirty = true
+    return
+  end
   if n == 2 then
     P.close()
     return
@@ -462,6 +542,12 @@ end
 function P.enc(n, d, shift)
   local l = layer
   if not l then return end
+  if l.kind == 'reader' then
+    local step = n == 3 and LINES - 1 or 1
+    l.scroll = util.clamp(l.scroll + d * step, 1, math.max(1, l.nlines - LINES + 1))
+    Tape.dirty = true
+    return
+  end
   if l.kind == 'editor' then
     if n == 2 then P.move(d > 0 and 'down' or 'up')
     elseif n == 3 then P.move(d > 0 and 'right' or 'left') end

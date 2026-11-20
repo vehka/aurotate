@@ -157,6 +157,9 @@ local function write_file(path, s)
   return true
 end
 
+-- atomic write with a .bak of the old file (exports use it too)
+Store.write_file = write_file
+
 ---- the open document
 
 -- load the document for `path` (or start a new one). Returns the document

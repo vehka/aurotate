@@ -7,9 +7,11 @@
 
 local Model = include 'lib/model'
 local Store = include 'lib/store'
+local Export = include 'lib/export'
 
 local Annot = {}
-Annot.Model, Annot.Store = Model, Store
+Annot.Model, Annot.Store, Annot.Export = Model, Store, Export
+Annot.rev = 0 -- counts edits, so lists know when to rebuild
 
 Annot.HOLD = 0.4       -- s: a longer K3 press starts a region
 Annot.HERE_PX = 3      -- a mark this close to the playhead (px) is "here"
@@ -23,7 +25,10 @@ local parked = 0
 function Annot.init(tape, view)
   Tape, View = tape, view
   Store.init(norns.state.data, util.time)
-  Model.changed = function() Store.touch() end
+  Model.changed = function()
+    Annot.rev = Annot.rev + 1
+    Store.touch()
+  end
 end
 
 function Annot.doc() return Store.doc() end
@@ -41,6 +46,7 @@ function Annot.switch(path, dur)
   local size = f and f:seek('end') or nil
   if f then f:close() end
   local doc, msg = Store.open(path, dur, size)
+  Annot.rev = Annot.rev + 1
   if msg then View.message(msg, 3) end
   local start = doc.tape.last_pos or 0
   if start >= dur - 1 then start = 0 end
@@ -147,7 +153,23 @@ function Annot.loop_here()
     View.message('NO REGION', 1)
     return
   end
+  Annot.loop_item(r)
+end
+
+-- loop region r (the regions page, the reader); when it is the loop already:
+-- loop off
+function Annot.loop_item(r)
+  local on = params:get('aur_loop') == 1
+  if on and math.abs(params:get('aur_loop_in') - r.t0) < 0.01 and math.abs(params:get('aur_loop_out') - r.t1) < 0.01 then
+    params:set('aur_loop', 0)
+    View.message('LOOP OFF', 1)
+    return
+  end
   Tape.loop(r.t0, r.t1)
+  -- a loop is entered by crossing an edge: start inside it (the loop param
+  -- does this only when it turns on)
+  local pos = Tape.st.pos
+  if on and (pos < r.t0 or pos >= r.t1) then Tape.jump(r.t0) end
   View.message('LOOP ' .. Annot.label(r):upper(), 1)
 end
 
@@ -155,6 +177,27 @@ end
 -- the place (cleanup saves it too)
 function Annot.park()
   if Tape.st.path and not Tape.playing() then Store.set_pos(Tape.st.pos) end
+end
+
+---- export (PARAMS > TAPE > export notes; export_notes() in the REPL)
+
+-- write dust/data/aurotate/exports/<tape id>/notes.md. Returns its path.
+function Annot.export()
+  local doc = Store.doc()
+  if not doc then
+    View.message('NO TAPE', 1)
+    return nil
+  end
+  local path, err = Export.write(doc, norns.state.data, Store.id(doc.tape.path), Store.write_file)
+  if path then
+    View.message('EXPORTED NOTES.MD', 2)
+    print('aurotate: exported ' .. path)
+  else
+    View.message('EXPORT FAILED', 3)
+    print('aurotate: export failed: ' .. tostring(err))
+  end
+  Tape.dirty = true
+  return path
 end
 
 function Annot.cleanup()

@@ -2,7 +2,7 @@
 -- an audio-anthropology workbench:
 -- hours-long recordings on tape
 --
--- phase 4: marks, regions, notes
+-- phase 5: regions list, notes export
 --
 -- E1 zoom
 -- K1+E1 page
@@ -17,6 +17,11 @@
 -- K1+K2 loop the region (or off)
 -- USB keyboard: type a note
 --
+-- regions page (K1+E1):
+-- E2 select, E3 tag filter
+-- K3 jump there, K1+K3 read
+-- K1+K2 loop the region
+--
 -- tape: K3 or PARAMS > TAPE
 
 engine.name = 'Aurotate'
@@ -28,6 +33,7 @@ local View = include 'lib/ui/tape_view'
 local Annot = include 'lib/annot'
 local Popup = include 'lib/ui/popup'
 local Keys = include 'lib/keys'
+local Regions = include 'lib/ui/regions'
 
 local st = Tape.st
 local shift = false
@@ -41,7 +47,7 @@ local FPS = 15
 local redraw_metro
 local stats = { n = 0, sum = 0, max = 0 } -- redraw time, for dbg_status()
 
----- pages (K1+E1); only the tape view exists so far
+---- pages (K1+E1); tape and regions exist so far
 
 local PAGES = { 'collection', 'tape', 'regions', 'settings' }
 local page = 2
@@ -67,11 +73,13 @@ end
 function init()
   Annot.init(Tape, View)
   Popup.init(Tape, Annot)
-  Keys.init(Tape, Annot, Popup, function() return PAGES[page] == 'tape' and not selecting end)
+  Regions.init(Tape, Annot, View)
+  Keys.init(Tape, Annot, Popup, Regions, function() return not selecting and PAGES[page] or nil end)
   Tape.on_open = function(path, dur)
     Popup.reset()
     return Annot.switch(path, dur)
   end
+  Tape.on_export = function() Annot.export() end
   Tape.add_params()
   -- the PSET holds only the tape's path (aur_file); its notes live in the
   -- tape document, saved on their own. Writing a PSET is a good moment to
@@ -105,9 +113,18 @@ function key(n, z)
     if z == 0 and util.time() - last_seek < SEEK_GRACE then last_seek = util.time() end
     return
   end
-  if PAGES[page] ~= 'tape' then return end
+  if PAGES[page] ~= 'tape' and PAGES[page] ~= 'regions' then return end
   if Popup.active() then
     Popup.key(n, z, shift)
+    return
+  end
+  if PAGES[page] == 'regions' then
+    if z == 1 and n == 2 then
+      if shift then Regions.loop() else Tape.toggle() end
+    elseif z == 1 and n == 3 then
+      if shift then Popup.open_reader(Regions.selected()) else Regions.jump() end
+    end
+    Tape.dirty = true
     return
   end
   if n == 3 then
@@ -129,8 +146,23 @@ end
 
 function enc(n, d)
   if n == 1 and shift then
+    local was = page
     page = util.clamp(page + d, 1, #PAGES)
+    if page ~= was then
+      Popup.reset() -- a popup belongs to the page it was opened on
+      if PAGES[page] == 'regions' then Regions.enter() end
+    end
     Tape.dirty = true
+    return
+  end
+  if PAGES[page] == 'regions' then
+    if Popup.active() then
+      if n ~= 1 then Popup.enc(n, d, shift) end
+    elseif n == 2 then
+      Regions.move(d)
+    elseif n == 3 then
+      Regions.filter_turn(d)
+    end
     return
   end
   if PAGES[page] ~= 'tape' then return end
@@ -163,7 +195,9 @@ function redraw()
   elseif PAGES[page] == 'collection' then
     placeholder('collection', 8)
   elseif PAGES[page] == 'regions' then
-    placeholder('regions', 5)
+    Regions.redraw(page, #PAGES)
+    Popup.redraw()
+    screen.update()
   else
     placeholder('settings')
   end
@@ -199,13 +233,26 @@ function notes_test()
   return include('test/model_test').run(norns.state.data .. 'model_test/')
 end
 
+-- write dust/data/aurotate/exports/<tape>/notes.md (also PARAMS > TAPE)
+function export_notes()
+  return Annot.export()
+end
+
 function clicks_test(path)
   return include('test/transport').clicks(Tape, path)
 end
 
 -- REPL handles: dbg.Tape, dbg.View; dbg_shot(name) redraws and saves the
 -- screen to dust/data/aurotate/<name>.png
-dbg = { Tape = Tape, View = View, Annot = Annot, Popup = Popup, Keys = Keys }
+dbg = { Tape = Tape, View = View, Annot = Annot, Popup = Popup, Keys = Keys, Regions = Regions }
+-- REPL: dbg_page('regions') shows a page
+function dbg_page(name)
+  for i, p in ipairs(PAGES) do
+    if p == name then page = i end
+  end
+  if PAGES[page] == 'regions' then Regions.enter() end
+  Tape.dirty = true
+end
 function dbg_shot(name)
   redraw()
   screen.export_screenshot(name or 'screen')

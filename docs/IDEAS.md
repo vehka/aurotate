@@ -27,6 +27,14 @@
 		  Space types a space, and typing a letter on the tape page starts a
 		  note. Maybe these keys only act outside the editor (Esc or a modifier
 		  inside it), or a modifier combo everywhere
+		* after phase 5 regions list (2026-11-20), on the regions page:
+		* Enter: open the selected mark / region (now it jumps the tape there)
+		  in the item popup (the editing one, not the reader); there Up / Down
+		  pick the property (label, note, tags, times...) and Enter again edits
+		  it: the note opens the note editor, the label text entry, etc.
+		* Space: jump the tape to the selected item
+		* note: Space is play / stop on the tape page in the idea above, so
+		  Space would mean different things on the two pages
 	* possibly integration with a transcription file, or not
 	* maybe: add audio notes as annotations, then can be played back along the sound or not (with softcut maybe?)
 	* notes-on-notes? allow stacking of notes, but gets tricky UI-wise

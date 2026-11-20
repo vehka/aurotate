@@ -117,6 +117,7 @@ local function state_label(Tape, st)
   if r < 0 then return string.format('REW x%g', -r), 15 end
   return string.format('x%g', r), 15
 end
+V.state_label = state_label -- the regions page shows the same state
 
 local function draw_ruler(spp, t0, dur)
   local tick = TICKS[#TICKS]

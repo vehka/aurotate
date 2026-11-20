@@ -251,7 +251,7 @@ local function fmt_time(p) return Tape.hms(p:get(), true) end
 
 function Tape.add_params()
   local pi3 = mem_total_mb() < 1500
-  params:add_group('aur_tape', 'TAPE', 22)
+  params:add_group('aur_tape', 'TAPE', 23)
 
   params:add_file('aur_file', 'tape', _path.audio)
   params:set_action('aur_file', function(path)
@@ -302,6 +302,8 @@ function Tape.add_params()
 
   params:add_separator('aur_sep_notes', 'transcription')
   params:add_control('aur_rewind', 'resume rewind (Esc)', cs.new(0, 10, 'lin', 0.5, 2, 's'))
+  params:add_trigger('aur_export', 'export notes (md)')
+  params:set_action('aur_export', function() if Tape.on_export then Tape.on_export() end end)
 
   params:add_separator('aur_sep_mem', 'memory')
   params:add_number('aur_ring', 'ring window', 16, 600, pi3 and 64 or 120, function(p) return p:get() .. ' s' end)

@@ -10,19 +10,25 @@
 --   F9         region in, then out
 --   Enter      close the editor (Shift+Enter: a new line)
 --
+-- On the regions page the hotkeys work too; Up/Down (PgUp/PgDn, Home/End)
+-- select, Enter jumps the tape there. In the reader popup Up/Down and
+-- PgUp/PgDn scroll, Enter closes.
+--
 -- F1–F5 belong to the system menu (core/keyboard.lua takes them before the
 -- script sees them), hence F6–F9 rather than the usual F1–F4.
 
 local Keys = {}
 
-local Tape, Annot, Popup
-local on_tape = function() return true end
+local Tape, Annot, Popup, Regions
+local page = function() return 'tape' end
 
 local SKIP = 5 -- s for F6 / F7
 
-function Keys.init(tape, annot, popup, on_tape_page)
-  Tape, Annot, Popup = tape, annot, popup
-  on_tape = on_tape_page
+-- page_fn: the page showing ('tape', 'regions', ...), nil while the file
+-- browser is open
+function Keys.init(tape, annot, popup, regions, page_fn)
+  Tape, Annot, Popup, Regions = tape, annot, popup, regions
+  page = page_fn
   keyboard.code = Keys.code
   keyboard.char = Keys.char
 end
@@ -31,8 +37,11 @@ local function editing() return Popup.kind() == 'editor' end
 
 local MOVES = { LEFT = 'left', RIGHT = 'right', UP = 'up', DOWN = 'down', HOME = 'home', END = 'end' }
 
+local LIST_MOVES = { UP = -1, DOWN = 1, PAGEUP = -7, PAGEDOWN = 7, HOME = -math.huge, END = math.huge }
+
 function Keys.code(c, v)
-  if v == 0 or not on_tape() or Popup.modal or not Tape.st.path then return end
+  local pg = page()
+  if v == 0 or (pg ~= 'tape' and pg ~= 'regions') or Popup.modal or not Tape.st.path then return end
   local press = v == 1
   -- transport hotkeys, also while typing
   if c == 'ESC' then
@@ -59,14 +68,29 @@ function Keys.code(c, v)
     elseif MOVES[c] then
       Popup.move(MOVES[c])
     end
-  elseif Popup.active() and press and (c == 'ENTER' or c == 'KPENTER') then
-    Popup.close()
+  elseif Popup.active() then
+    if press and (c == 'ENTER' or c == 'KPENTER') then
+      Popup.close()
+    elseif Popup.kind() == 'reader' and (c == 'UP' or c == 'DOWN') then
+      Popup.enc(2, c == 'UP' and -1 or 1)
+    elseif Popup.kind() == 'reader' and (c == 'PAGEUP' or c == 'PAGEDOWN') then
+      Popup.enc(3, c == 'PAGEUP' and -1 or 1)
+    end
+  elseif pg == 'regions' then
+    if LIST_MOVES[c] then
+      Regions.move(math.max(-100000, math.min(100000, LIST_MOVES[c])))
+    elseif press and (c == 'ENTER' or c == 'KPENTER') then
+      Regions.jump()
+    end
   end
 end
 
 function Keys.char(ch)
-  if not on_tape() or Popup.modal or not Tape.st.path then return end
+  local pg = page()
+  if Popup.modal or not Tape.st.path or not pg then return end
   if keyboard.ctrl() or keyboard.alt() or keyboard.meta() then return end
+  -- typing writes notes from the tape page, or into an editor opened anywhere
+  if not editing() and pg ~= 'tape' then return end
   if not editing() then
     local back = Popup.kind() == 'item' and Popup.layer() or nil
     local item = Popup.item() or Annot.here() or Annot.add_mark(Tape.st.pos)
