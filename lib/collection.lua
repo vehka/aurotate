@@ -3,7 +3,8 @@
 --   <data>/collection.lua   the index: one entry per tape (a file or a reel)
 --
 -- entry = { path, title, dur, opened (os.time), marks, regions, last_pos,
---           size, cache (the analysis cache dir), parts (reels), origin }
+--           size, cache (the analysis cache dir), parts (reels), origin,
+--           author, license (a downloaded tape's source) }
 --
 -- The index is a summary for the list, kept up to date when a tape opens and
 -- when it is left; the tape documents (lib/store.lua) stay the truth. The
@@ -46,6 +47,8 @@ local function clean(e)
     cache = type(e.cache) == 'string' and e.cache or nil,
     parts = num(e.parts) and e.parts or nil,
     origin = type(e.origin) == 'table' and e.origin or nil,
+    author = type(e.author) == 'string' and e.author or nil,
+    license = type(e.license) == 'string' and e.license or nil,
   }
 end
 
@@ -66,7 +69,8 @@ function Collection.load(docs_fn)
       if tape.path then
         entries[#entries + 1] = clean({ path = tape.path, title = tape.title, dur = tape.dur,
           marks = #doc.marks, regions = #doc.regions, last_pos = tape.last_pos, size = tape.size,
-          origin = tape.origin })
+          origin = tape.origin, author = tape.source and tape.source.author,
+          license = tape.source and tape.source.license })
       end
     end
     if #entries > 0 then Collection.save() end
@@ -119,6 +123,8 @@ function Collection.from_doc(doc, now)
   local e = Collection.update(t.path, { title = t.title ~= '' and t.title or nil, dur = t.dur,
     marks = #doc.marks, regions = #doc.regions, last_pos = t.last_pos or 0, size = t.size }, now)
   e.origin = t.origin
+  e.author = t.source and t.source.author or nil
+  e.license = t.source and t.source.license or nil
   return e
 end
 

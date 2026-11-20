@@ -4,10 +4,11 @@ An audio-anthropology workbench for norns: play recordings hours long on an
 analog-feeling tape, mark and annotate them, and give regions their own
 sound. Work in progress; see `docs/PLAN.md`.
 
-Current state: **phase 8**: marks, regions and notes (phase 4), the
+Current state: **phase 9**: marks, regions and notes (phase 4), the
 **regions list** with a reader and **notes export as Markdown** (phase 5),
-**per-region sound** (phase 6), and the **collection**, **split-file reels**
-and the **wall clock** (phase 8). Phase 7 (region voices) is deferred. A SuperCollider engine streams
+**per-region sound** (phase 6), the **collection**, **split-file reels**
+and the **wall clock** (phase 8), and **downloads** by URL and from
+Freesound (phase 9). Phase 7 (region voices) is deferred. A SuperCollider engine streams
 the file from disk through a RAM ring window, so length is limited by disk,
 not RAM. When a tape is opened for the first time it is analysed in the
 background (about 1 minute per 2 hours on a Pi 3; the tape plays meanwhile).
@@ -85,7 +86,45 @@ popup:
 - *relink*: a tape whose file was moved or renamed: K3 searches
   `dust/audio` for a file with its name and size, E3 picks, K3 twice moves
   its notes (and its analysis) there.
+- *source*: a downloaded tape: who made it (the license is in the popup's
+  title); K3 shows the whole credit line. *author* and *license*: for a tape
+  from a plain URL, type them (K3) so it can be credited.
 - *forget*: drops it from the list; its notes stay on disk.
+
+**Downloads:** K3 on the last row (*+ add a tape*) opens the add popup:
+*file* (the file browser), *url* (type an http/https link), *freesound*
+(type a Freesound sound id, or paste a link to the sound), *queue*, *login*,
+*api key*, *client id*. A USB keyboard makes the typing easy. You can also
+write requests into `dust/data/aurotate/downloads.txt` (over SMB or in
+maiden), one per line, `https://…` or `freesound:12345`, and fetch them with
+*queue*; requests that fail are written back into the file as comments.
+From maiden: `download('https://…')`, `download('freesound:12345')`,
+`downloads()`.
+
+Downloads run one at a time in the background and show as rows in the
+collection with their progress (K3 twice cancels; a failed one says why,
+K3 drops it). Plain URLs go into `dust/audio/aurotate/`, Freesound sounds
+into `dust/audio/aurotate/freesound/`. A file that isn't WAV or FLAC is
+converted to FLAC at 48 kHz (ogg, aif with sox; mp3 and m4a need ffmpeg,
+which the script offers to install). Next to each file is
+`<file>.source.txt` with the credit line and where it came from, and the
+tape's notes know it too: the tape popup and `notes.md` give the credit
+(marking non-commercial licenses). A Freesound sound's description and tags
+become its first note, a mark at 0:00.
+
+**Freesound** needs your own API credentials, once: log in at
+freesound.org and apply at https://freesound.org/apiv2/apply. Put the
+*client id* and the *client secret* (the API key) into the add popup's
+*client id* and *api key* rows, or into `dust/data/aurotate/freesound.lua`:
+`return { api_key = '…', client_id = '…' }`. With the key alone you get the
+sound's **preview** (an ogg, good enough to listen and annotate; the tape
+says `(preview)`). For the **original file**, log in: *login* (K3) writes a
+link to `dust/data/aurotate/freesound_login.txt` (and prints it in maiden);
+open it on a computer or phone, allow access, and type the code Freesound
+shows into the text entry that opened (within 10 minutes; maiden:
+`freesound_code('…')`). The login lasts until you log out (K3 twice on
+*login*) or revoke it on freesound.org; the tokens stay in
+`freesound.lua`, readable only by the `we` user.
 
 On a USB keyboard Up/Down select, Enter opens, Esc plays / stops.
 
@@ -108,6 +147,8 @@ region, for reading edits back in later; leave them as they are.
   the parts of a reel must share rate and channel count
 - `sox` and `gcc` on the device for the analysis (both are on standard
   norns images); the helper `aurpeaks` is built on first use
+- for downloads: `curl` (offered for install when missing), and `ffmpeg`
+  for mp3 / m4a (offered when one comes in)
 - After installing or updating: SYSTEM > RESTART (the engine is a new class)
 
 ## Controls

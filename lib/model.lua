@@ -1,12 +1,14 @@
 -- model: the tape document, its marks and regions (docs/PLAN.md §3)
 --
---   doc    = { version, tape = { path, size, dur, title, last_pos, origin? }, next_id,
+--   doc    = { version, tape = { path, size, dur, title, last_pos, origin?, source? },
+--              next_id,
 --              marks = { mark... }, regions = { region... } }
 --   mark   = { id = 'm3', t, label, note, tags = {}, created }
 --   region = { id = 'r4', t0, t1, label, note, tags = {}, created,
 --              snd = { dry, send_a, send_b, gain, pan, tone }? }  (lib/sound.lua)
 --   origin = { date, secs, source }: where the recording starts, for the
 --            wall clock (lib/wallclock.lua)
+--   source = where a downloaded tape came from, who to credit (lib/source.lua)
 --
 -- Pure data, no norns calls, so it can be tested off the device. Lists stay
 -- sorted by time (marks by t, regions by t0). Every change goes through a
@@ -15,6 +17,7 @@
 
 local Sound = include 'lib/sound'
 local Wall = include 'lib/wallclock'
+local Source = include 'lib/source'
 
 local Model = {}
 
@@ -268,6 +271,19 @@ function Model.set_origin(doc, origin)
   Model.changed(doc)
 end
 
+-- set one crediting field of a downloaded tape (author, license, title)
+function Model.set_source(doc, field, value)
+  local src = doc.tape.source
+  if not src then
+    src = { kind = 'url' }
+    doc.tape.source = src
+  end
+  if value == '' then value = nil end
+  if src[field] == value then return end
+  src[field] = value
+  Model.changed(doc)
+end
+
 ---- loading: validation and migrations
 
 -- migrations[v] turns a version v document into version v + 1
@@ -322,6 +338,7 @@ function Model.validate(t)
   doc.tape.title = str(tape.title)
   doc.tape.last_pos = num(tape.last_pos) and math.max(0, tape.last_pos) or 0
   doc.tape.origin = Wall.clean(tape.origin)
+  doc.tape.source = Source.clean(tape.source)
   local max_id, dropped, ids = 0, 0, {}
   local function take_id(id, prefix)
     if type(id) ~= 'string' or id:sub(1, 1) ~= prefix or ids[id] then return nil end

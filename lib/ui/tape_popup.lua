@@ -10,6 +10,11 @@
 --              K3 twice: join
 --   relink     a missing tape: K3 search dust/audio by name and size, E3
 --              pick, K3 relink
+--   source     a downloaded tape: the author (the license in the title);
+--              K3 the whole credit
+--              (E2 scrolls, K2/K3 back)
+--   author, license   a tape from a plain URL: K3 type them (Freesound
+--              tapes know theirs)
 --   forget     K3 twice: drop it from the list (its notes stay on disk)
 --
 -- K2 closes (a changed start time is saved then).
@@ -18,6 +23,7 @@ local textentry = require 'textentry'
 local Wall = include 'lib/wallclock'
 local Bext = include 'lib/bext'
 local Reel = include 'lib/reel'
+local Source = include 'lib/source'
 
 local TP = {}
 
@@ -54,8 +60,25 @@ local function current_origin(e)
   return bext_origin(e)
 end
 
+-- a downloaded tape's source: the open document's, else the stored one's
+local function current_source(e)
+  if Tape.st.path == e.path then
+    local doc = Annot.doc()
+    return doc and doc.tape.source
+  end
+  local doc = Store.peek(e.path)
+  return doc and doc.tape.source
+end
+
 local function rows_for(l)
   local rows = { 'file', 'length', 'start' }
+  if l.source then
+    rows[#rows + 1] = 'source'
+    if l.source.kind == 'url' then
+      rows[#rows + 1] = 'author'
+      rows[#rows + 1] = 'license'
+    end
+  end
   if l.missing then
     rows[#rows + 1] = 'relink'
   elseif not Reel.is(l.e.path) and l.cands and #l.cands > 1 then
@@ -71,7 +94,7 @@ function TP.open(e)
   if not missing and not Reel.is(e.path) then cands, confirmed = Shelf.candidates(e.path) end
   layer = { e = e, missing = missing, cands = cands, confirmed = confirmed,
     join_n = confirmed, row = 1, confirm = nil, origin = current_origin(e), origin_dirty = false,
-    found = nil, found_i = 1 }
+    found = nil, found_i = 1, source = current_source(e), view = nil }
   layer.rows = rows_for(layer)
   Tape.dirty = true
 end
@@ -138,7 +161,47 @@ local function row_value(l, name)
     return l.found_i .. '/' .. #l.found .. ' ' .. l.found[l.found_i]:sub(#_path.audio + 1)
   end
   if name == 'forget' then return l.confirm == 'forget' and 'K3 again' or '' end
+  if name == 'source' then
+    local fs = l.source.freesound
+    return (l.source.author or '?') .. ((fs and fs.file and fs.file ~= 'original') and ' (preview)' or '')
+  end
+  if name == 'author' or name == 'license' then return l.source[name] or '- (K3: type)' end
   return ''
+end
+
+-- the whole credit and source, to read
+local function view_text(src)
+  local o = { Source.credit(src) }
+  local fs = src.freesound
+  if fs then
+    if fs.file and fs.file ~= 'original' then o[#o + 1] = 'file: ' .. fs.file .. ' (not the original)' end
+    if fs.created then o[#o + 1] = 'uploaded: ' .. fs.created:sub(1, 10) end
+    if fs.pack then o[#o + 1] = 'pack: ' .. fs.pack end
+  else
+    if src.final_url and src.final_url ~= src.url then o[#o + 1] = 'from: ' .. src.final_url end
+    if src.last_modified then o[#o + 1] = 'modified: ' .. src.last_modified end
+  end
+  if src.downloaded then o[#o + 1] = 'downloaded: ' .. os.date('%Y-%m-%d %H:%M', src.downloaded) end
+  if Source.noncommercial(src.license) then o[#o + 1] = 'non-commercial use only' end
+  return table.concat(o, '\n')
+end
+
+local function draw_view(l)
+  local G = Popup.GEOM
+  Popup.title('SOURCE', l.source.kind == 'freesound' and 'FREESOUND' or 'URL')
+  Popup.text_font()
+  local text = l.view.text
+  local lines = Popup.wrap(text)
+  l.view.n = #lines
+  l.view.scroll = util.clamp(l.view.scroll, 1, math.max(1, #lines - G.LINES + 1))
+  for i = 0, G.LINES - 1 do
+    local ln = lines[l.view.scroll + i]
+    if not ln then break end
+    screen.level(l.view.scroll + i == 1 and 15 or 11)
+    screen.move(G.TX, G.LINES_Y + i * G.LINE_H)
+    screen.text(text:sub(ln[1], ln[2]))
+  end
+  Popup.ui_font()
 end
 
 function TP.redraw()
@@ -148,6 +211,10 @@ function TP.redraw()
   screen.font_face(1)
   screen.font_size(8)
   Popup.frame_box()
+  if l.view then
+    draw_view(l)
+    return
+  end
   -- the title's right side explains the selected row
   local name = l.rows[l.row]
   local right = l.missing and 'MISSING' or (l.e.parts and (l.e.parts .. ' PARTS') or nil)
@@ -155,6 +222,8 @@ function TP.redraw()
     right = l.origin.source == 'bext' and 'FROM FILE' or 'BY HAND'
   elseif name == 'join' and l.join_n > 0 then
     right = name_of(l.cands[l.join_n + 1].path):upper()
+  elseif name == 'source' then
+    right = Source.license_short(l.source.license) or 'NO LICENSE'
   end
   Popup.title('TAPE', right)
   local top = util.clamp(l.row - G.NROWS + 1, 1, math.max(1, #l.rows - G.NROWS + 1))
@@ -218,9 +287,35 @@ local function edit_origin(l)
   end)
 end
 
+-- write a crediting field (author, license) of a tape from a URL
+local function set_source(l, field, value)
+  local e = l.e
+  if Tape.st.path == e.path then
+    local doc = Annot.doc()
+    if not doc then return end
+    Model.set_source(doc, field, value)
+    l.source = doc.tape.source
+    Collection.from_doc(doc)
+  else
+    local doc = Store.peek(e.path)
+    if not doc then return end
+    Model.set_source(doc, field, value)
+    local ok, err = Store.put(e.path, doc)
+    if not ok then print('aurotate: source not saved: ' .. tostring(err)) end
+    l.source = doc.tape.source
+    Collection.from_doc(doc)
+    Collection.flush()
+  end
+end
+
 function TP.key(n, z, shift)
   local l = layer
   if not l or z == 0 then return end
+  if l.view then
+    if n == 2 or n == 3 then l.view = nil end
+    Tape.dirty = true
+    return
+  end
   if n == 2 then
     TP.close()
     return
@@ -230,6 +325,15 @@ function TP.key(n, z, shift)
   if name ~= l.confirm then l.confirm = nil end
   if name == 'start' then
     edit_origin(l)
+  elseif name == 'source' then
+    l.view = { text = view_text(l.source), scroll = 1, n = 0 }
+  elseif name == 'author' or name == 'license' then
+    TP.modal = true
+    textentry.enter(function(txt)
+      TP.modal = false
+      if txt then set_source(l, name, Source.trim(txt)) end
+      Tape.dirty = true
+    end, l.source[name] or '', name)
   elseif name == 'join' then
     if l.join_n == 0 then return end
     if l.confirm == 'join' then
@@ -274,6 +378,14 @@ TP.on_done = function(msg, path) end
 function TP.enc(n, d, shift)
   local l = layer
   if not l then return end
+  if l.view then
+    if n == 2 or n == 3 then
+      local step = n == 3 and Popup.GEOM.LINES - 1 or 1
+      l.view.scroll = util.clamp(l.view.scroll + d * step, 1, math.max(1, l.view.n - Popup.GEOM.LINES + 1))
+    end
+    Tape.dirty = true
+    return
+  end
   if n == 2 then
     local was = l.rows[l.row]
     l.row = util.clamp(l.row + d, 1, #l.rows)

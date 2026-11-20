@@ -4,8 +4,12 @@
 --   E3       sort: recent / name / length
 --   K2       play / stop the open tape
 --   K3       open the selected tape (and go to the tape page); on the last
---            row: add a tape (the file browser)
+--            row: add a tape (the add popup: file, URL, Freesound); on a
+--            download: K3 twice cancels it (or drops a failed one)
 --   K1+K3    the tape popup: start time, join split files, relink, forget
+--
+-- Downloads (lib/download.lua) are rows between the tapes and "+ add", with
+-- an arrow, the name and the progress.
 --
 -- Rows: a bar at the left for the open tape, ≡ for a reel, the title, a dot
 -- when it has notes, the length. Missing tapes are dim with a ?. Under the
@@ -25,7 +29,8 @@ local ROW_H = 7
 local TOP = 10
 local STRIP_Y, STRIP_H = 48, 7
 
-local Tape, Annot, Shelf, View, Collection
+local Tape, Annot, Shelf, View, Collection, D
+local draw_job
 C.sel = 1
 C.top = 1
 C.sort = 1
@@ -36,8 +41,8 @@ local INFO_TTL = 10
 
 local list_cache = { rev = -1, sort = 0, n = -1, list = {} }
 
-function C.init(tape, annot, shelf, view)
-  Tape, Annot, Shelf, View = tape, annot, shelf, view
+function C.init(tape, annot, shelf, view, download)
+  Tape, Annot, Shelf, View, D = tape, annot, shelf, view, download
   Collection = annot.Collection
 end
 
@@ -54,11 +59,19 @@ end
 C.rev = 0
 function C.changed() C.rev = C.rev + 1 end
 
-local function count() return #list() + 1 end -- + the "add" row
+local function count() return #list() + #D.jobs + 1 end -- + the downloads, the "add" row
 
 function C.selected()
   return list()[C.sel]
 end
+
+-- the download on the selected row, if it is one
+function C.selected_job()
+  local n = #list()
+  if C.sel > n then return D.jobs[C.sel - n] end
+end
+
+C.confirm = nil -- a job whose cancel waits for K3 again
 
 local function clamp()
   C.sel = util.clamp(C.sel, 1, count())
@@ -85,6 +98,7 @@ function C.select_path(path)
 end
 
 function C.move(d)
+  C.confirm = nil
   C.sel = util.clamp(C.sel + d, 1, count())
   clamp()
   Tape.dirty = true
@@ -101,6 +115,21 @@ end
 -- K3: the tape opens; returns true when the page should change to the tape
 function C.open()
   local e = C.selected()
+  local job = C.selected_job()
+  if job then
+    if job.state == 'failed' then
+      D.dismiss(job)
+    elseif C.confirm == job then
+      D.cancel(job)
+      C.confirm = nil
+      View.message('CANCELLED', 1)
+    else
+      C.confirm = job
+      View.message('K3 AGAIN: CANCEL', 2)
+    end
+    clamp()
+    return false
+  end
   if not e then return 'add' end
   if Shelf.missing(e) then
     View.message('MISSING: K1+K3 RELINK', 2)
@@ -163,6 +192,39 @@ end
 local function tiny() screen.font_face(25) screen.font_size(6) end
 local function normal() screen.font_face(1) screen.font_size(8) end
 
+local function job_state(job)
+  local s = job.state
+  if s == 'fetching' then return math.floor((job.progress or 0) * 100) .. '%' end
+  if s == 'converting' then return 'convert' end
+  if s == 'metadata' or s == 'login' or s == 'starting' then return '...' end
+  return s
+end
+
+-- a download row: an arrow, its name, its state on the right
+draw_job = function(job, y, sel)
+  local failed = job.state == 'failed'
+  screen.level(failed and 4 or (sel and 15 or 9))
+  screen.move(4, y + 1)
+  screen.line_rel(0, 4)
+  screen.stroke()
+  screen.rect(2, y + 4, 5, 1)
+  screen.rect(3, y + 5, 3, 1)
+  screen.fill()
+  local right = job_state(job)
+  screen.move(126, y + 6)
+  screen.text_right(right)
+  local w = screen.text_extents(right)
+  screen.level(failed and 4 or (sel and 15 or 9))
+  screen.move(9, y + 6)
+  screen.text(util.trim_string_to_width(job.name or job.line, 126 - w - 4 - 9))
+  -- the progress, a line under the row
+  if job.state == 'fetching' and (job.progress or 0) > 0 then
+    screen.level(sel and 8 or 4)
+    screen.rect(9, y + ROW_H - 1, math.floor((117 - 9) * job.progress), 1)
+    screen.fill()
+  end
+end
+
 function C.redraw(page, pages)
   local st = Tape.st
   screen.clear()
@@ -186,7 +248,10 @@ function C.redraw(page, pages)
       screen.fill()
     end
     local e = l[k]
-    if not e then
+    local job = not e and D.jobs[k - #l]
+    if job then
+      draw_job(job, y, sel)
+    elseif not e then
       screen.level(sel and 15 or 5)
       screen.move(9, y + 6)
       screen.text('+ add a tape')
@@ -268,14 +333,31 @@ function C.redraw(page, pages)
     local n = marks + regions
     if n > 0 then parts[#parts + 1] = n .. (n == 1 and ' note' or ' notes') end
     if origin then parts[#parts + 1] = Wall.date_label(origin) .. ' ' .. Wall.time(origin, 0):sub(1, 5) end
+    if e.author then parts[#parts + 1] = 'by ' .. e.author end
     if #parts == 0 then parts[1] = d.missing and 'missing' or 'no notes' end
     screen.level(6)
     screen.move(0, 63)
     screen.text(util.trim_string_to_width(table.concat(parts, ', '), 127))
+  elseif C.selected_job() then
+    local job = C.selected_job()
+    screen.level(6)
+    screen.move(0, STRIP_Y + 7)
+    screen.text(util.trim_string_to_width(job.line, 127))
+    local msg
+    if job.state == 'failed' then
+      msg = (job.err or 'failed') .. (job.needs and '' or ' (K3: drop)')
+    elseif job.state == 'queued' then
+      msg = 'queued (K3 twice: cancel)'
+    else
+      msg = job.state .. (job.preview and ', freesound preview' or '') .. ' (K3 twice: cancel)'
+    end
+    screen.level(job.state == 'failed' and 10 or 6)
+    screen.move(0, 63)
+    screen.text(util.trim_string_to_width(msg, 127))
   else
     screen.level(4)
     screen.move(64, STRIP_Y + 10)
-    screen.text_center('K3: choose a file')
+    screen.text_center('K3: add a tape or download')
   end
   normal()
 end

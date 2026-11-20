@@ -19,6 +19,7 @@
 local Model = include 'lib/model'
 local Sound = include 'lib/sound'
 local Wall = include 'lib/wallclock'
+local Source = include 'lib/source'
 
 local Export = {}
 
@@ -131,6 +132,15 @@ function Export.markdown(doc, opts)
   if tape.path then add('- file: `' .. tape.path .. '`') end
   for i, p in ipairs(opts.parts or {}) do add(string.format('  - part %d: `%s`', i, p)) end
   if tape.dur then add('- length: ' .. Export.tc(tape.dur, long)) end
+  local credit = Source.credit(tape.source)
+  if credit then
+    add('- source: ' .. one_line(credit))
+    local fs = tape.source.freesound
+    if fs and fs.file and fs.file ~= 'original' then
+      add('  - the file is Freesound\'s ' .. fs.file .. ', not the original')
+    end
+    if Source.noncommercial(tape.source.license) then add('  - non-commercial use only') end
+  end
   if origin then
     add('- recorded: ' .. Wall.stamp(origin) .. ' – ' .. Wall.stamp(origin, tape.dur or 0)
       .. (origin.source == 'bext' and ' (from the file\'s bext chunk)' or ' (set by hand)'))

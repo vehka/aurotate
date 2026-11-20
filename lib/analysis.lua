@@ -59,7 +59,7 @@ local function kill_job(dir)
   -- only if that pid is still our script (pids get reused)
   local cmd = read_file('/proc/' .. pid .. '/cmdline') or ''
   if cmd:find('analyze.sh', 1, true) then
-    os.execute('kill -TERM -- -' .. pid .. ' 2> /dev/null')
+    os.execute('kill -TERM -' .. pid .. ' 2> /dev/null')
   end
   os.remove(dir .. 'pid')
 end

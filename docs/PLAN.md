@@ -1,4 +1,4 @@
-# aurotate: implementation plan (draft 9, phase 8 built; phase 7 deferred)
+# aurotate: implementation plan (draft 10, phase 9 built; phase 7 deferred)
 
 An audio-anthropology workbench for norns: play recordings hours long on an
 analog-feeling tape, mark points and regions, attach notes and per-region
@@ -530,6 +530,174 @@ Write to `_path.data/aurotate/exports/<tape>/`:
    along the links.
 8. Tape **spin-up / spin-down** wow on start/stop, with a depth param.
 
+### 6.9 Downloads: by URL and from Freesound (phase 9; planned 2026-11-20)
+Bring recordings onto the device without a computer: an http(s) URL, or a
+Freesound sound id. Every downloaded tape keeps where it came from and who
+made it, so it can be credited.
+
+**Getting a request onto the device.** Typing a URL with `textentry` is
+painful, so three ways in:
+- the collection's last row *+ add a tape* gets a choice: file browser /
+  URL / Freesound id (textentry; a USB keyboard makes it easy; a Freesound
+  id is just digits);
+- a queue file `dust/data/aurotate/downloads.txt` (written over SMB or in
+  maiden): one request per line, `https://…` or `freesound:12345`; the
+  collection page offers to fetch what is in it;
+- the REPL: `download('https://…')`, `download('freesound:12345')`.
+
+**Plain http(s).** A detached job (like the analysis, §2.3) runs `curl -L
+--fail` with a size cap and a timeout into `dust/audio/aurotate/downloads/`,
+then converts what isn't WAV/FLAC (see *formats*). Only `http://` and
+`https://`. The name comes from `Content-Disposition` or the URL path,
+sanitised, never overwriting (`-2`, `-3`). Free space is checked first
+(`df`) against `Content-Length` when given. Progress from curl's `-#` /
+`NN%` output, shown in the collection row. Metadata kept: the URL, the
+final URL after redirects, `Content-Type`, `Last-Modified`, the download
+time. Author and license are unknown for a plain URL: the tape popup gets
+*author* and *license* rows to fill in by hand.
+
+**Freesound.** API v2 (https://freesound.org/docs/api/). Yes, it needs a
+registration, done once by the user with their own Freesound account:
+1. Apply at https://freesound.org/apiv2/apply (logged in). The page gives
+   a **client id** and a **client secret / API key**. These are the user's;
+   aurotate ships none. The user puts them in
+   `dust/data/aurotate/freesound.lua` (`{ api_key = '…', client_id = '…' }`)
+   over SMB / maiden, or types them in a settings popup.
+2. **API key only** (token auth: `Authorization: Token <key>`) gives the
+   sound's metadata (`GET /apiv2/sounds/<id>/`) and its **previews**:
+   `preview-hq-ogg` (~192 kbps) and `preview-hq-mp3` (~128 kbps). Lossy,
+   but enough to listen and annotate. Prefer the ogg (sox and libsndfile
+   read Vorbis on the device; this sox has no mp3).
+3. **The original file** (`GET /apiv2/sounds/<id>/download/`) needs
+   **OAuth2** (authorization code grant, PKCE `S256`, which is required for
+   apps registered from November 2026 on). On a norns there is no browser,
+   so:
+   - aurotate makes `state`, `code_verifier` (32 random bytes, base64url)
+     and `code_challenge = base64url(sha256(verifier))` (`openssl dgst
+     -sha256 -binary | base64`; Lua has no sha256), and writes the authorize
+     URL (`https://freesound.org/apiv2/oauth2/authorize/?client_id=…&
+     response_type=code&code_challenge=…&code_challenge_method=S256&state=…`)
+     to `dust/data/aurotate/freesound_login.txt` and prints it in maiden;
+   - the user opens it on a computer or phone and allows access. The app
+     is registered with Freesound itself as the redirect target, so the
+     page shows the **code** to copy;
+   - the user types the code within **10 minutes** (USB keyboard /
+     textentry, or into a file). aurotate POSTs to
+     `https://freesound.org/apiv2/oauth2/access_token/` (`client_id`,
+     `grant_type=authorization_code`, `code`, `code_verifier`,
+     `redirect_uri`) and stores `access_token` (valid 24 h), its expiry and
+     `refresh_token` in `freesound.lua` (mode 600; never in PSETs, never
+     printed). Before a download it refreshes when expired
+     (`grant_type=refresh_token`); every refresh returns a **new** refresh
+     token, which must be saved at once. A 401 "Invalid token" (access
+     revoked) clears the tokens and asks for a new login.
+   - Without a login, a Freesound request falls back to the hq preview and
+     says so (`PREVIEW` in the tape's source).
+4. Limits: per user, readable from `GET /apiv2/usage/` (not throttled). A
+   few requests per sound (metadata, maybe a refresh, the file) is far below
+   them; a queue runs one download at a time.
+
+**Attribution metadata** goes into the tape document (truth, travels with
+the notes) and into a sidecar next to the audio file (travels with the
+file):
+
+```
+doc.tape.source = {
+  kind = 'freesound' | 'url',
+  url,                    -- what was asked for
+  final_url, content_type, last_modified,       -- url
+  freesound = { id, name, username, url (the sound's page), license
+                (e.g. "Attribution 4.0"), description, tags, created,
+                pack, geotag, original = { type, samplerate, channels,
+                duration, filesize, md5 }, gen_ai_preference,
+                file = 'original' | 'preview-hq-ogg' | … },
+  author, license, title, -- for crediting; from Freesound or typed by hand
+  downloaded,             -- os.time()
+}
+```
+
+- The sidecar `<file>.source.txt` (plain text, also the credit line):
+  `"<name>" by <username> (https://freesound.org/s/<id>/), <license>`, then
+  the fields above, one per line.
+- `Model.validate` keeps `source` (cleaned like `origin`), and the
+  collection index carries `author` / `license` for the list.
+- The tape popup gets a *source* row (author · license; K3 shows the whole
+  credit in the reader); *author* / *license* editable for plain URLs.
+- `notes.md` header: `- source:` with the credit line and the license, so
+  an export can be used as is. Later, a `credits.md` over the whole
+  collection (every tape with a source).
+- A Freesound `created` date is *not* the recording's start; the wall clock
+  (§6.2) stays unset unless the file has bext.
+- Non-commercial licenses (`Attribution NonCommercial`) are shown as such in
+  the popup and the export.
+
+**Formats.** Freesound originals can be wav, aif(f), flac, ogg, mp3 or m4a,
+44.1 kHz or other rates, URLs anything. A download that isn't WAV/FLAC is
+converted to FLAC (the working format, §2.3b; 48 kHz so the engine doesn't
+resample). sox does wav/aif/flac/ogg on the device; mp3 and m4a/aac need
+**ffmpeg**. WAV/FLAC at other rates are played as they are (the engine
+handles the rate) unless the import step converts them.
+
+**Dependencies via norns-deps** (`../norns-deps`: copy `lib/deps.lua` and
+`lib/deps/` into `lib/`; `deps.new { name = 'aurotate', dir =
+norns.state.data .. 'deps' }`). Checked when a download is first asked
+for, never at init; `d:ensure` opens its installer screen only if something
+is missing:
+- `curl` (check `curl`, pkg `curl`): http(s) and the API;
+- `openssl` (check `openssl`): PKCE's sha256 (only for the Freesound login);
+- `ffmpeg` (check `ffmpeg`, pkg `ffmpeg`, optional, size ~20 MB with its
+  libraries): mp3 / m4a. Without it such a download stops with "needs
+  ffmpeg" and the installer offers it;
+- JSON: no package. Vendor a small pure-Lua decoder (e.g. rxi/json.lua,
+  MIT) as `lib/json.lua`; norns core has none, and jq isn't on the image.
+
+Measured on the shield (2026-11-20): curl, wget, openssl and ffmpeg are
+installed (ffmpeg probably by hand; not assumed on a stock image); sox has
+no mp3 format; no jq.
+
+**Built as** `lib/download.lua` (job runner: curl into a temp file,
+progress, cancel, convert, move into place, sidecar), `lib/freesound.lua`
+(API calls, OAuth2 + PKCE, token store, metadata → `source`),
+`lib/json.lua` (vendored), `lib/deps.lua` + `lib/deps/` (vendored
+norns-deps), UI in the collection (add-row choice, a row per running
+download with progress, a *source* row in the tape popup, a Freesound
+settings popup: key / client id present, login state, log in / log out).
+
+**Tests:** off the device: JSON fixtures of a sound instance → `source`,
+the credit line, file names, the PKCE challenge against RFC 7636's test
+vector (appendix B), the token store's expiry logic, `validate` of
+`source`. On the device: a URL download (a WAV and an mp3), a Freesound id
+with only an API key (preview), the login and an original download, a
+refresh after expiry (set `expires` in the past), a revoked token, a
+cancelled download leaving no partial file, and the analysis of the result.
+
+**Settled before building** (2026-11-20):
+- Ids only, no search on the device (yet).
+- Packs: later; when they come, one tape per sound.
+- Folders: Freesound downloads go to `dust/audio/aurotate/freesound/`,
+  plain URLs to `dust/audio/aurotate/` itself.
+- A Freesound tape's description (and its tags, as text) becomes a first
+  note: a mark at 0:00 labelled with the sound's name.
+
+✅ **Built (phase 9, 2026-11-20)** as planned, with these differences:
+- **No openssl:** SHA-256 and base64url are pure Lua (`lib/pkce.lua`, checked
+  against RFC 7636 appendix B and the FIPS vectors), so the login needs only
+  curl.
+- **No HEAD / Content-Length check:** one GET with `--max-filesize` = the
+  smaller of 4 GB and the free space (`df`) minus 200 MB.
+- The type comes from the file's first bytes (`Source.sniff`), not the
+  server's `Content-Type`; an HTML or JSON error page is refused. HTTP
+  status from curl's write-out (`--fail` would drop the headers).
+- Secrets never go on a command line: each authorised request is a curl
+  config file (`-K`, mode 600) in a mode 700 temp folder, deleted after.
+- The token request also sends `client_secret` (the API key); `redirect_uri`
+  only when `freesound.lua` sets one (otherwise Freesound uses the
+  registered one). `freesound.lua` may set `base` (the mock server in tests).
+- Freesound names with an audio extension lose it in the tape title
+  (`wind.wav` → `wind`); the credit keeps the name as it is.
+- The popup's *source* row shows the author (and `(preview)`); the license,
+  short (`CC BY-NC 4.0`), is in the popup title. The tape font has no `·`.
+
 ## 7. Phases
 
 | # | deliverable | done when |
@@ -543,7 +711,8 @@ Write to `_path.data/aurotate/exports/<tape>/`:
 | 6 | ✅ **Per-region sound** (2026-11-20, Pi 3; see §9.1): output stage, fx v2 sends, send-as-insert, boundary glides, current-region params | done: `sound_test()` levels exact (−12 dB, mute, hard pan, nested +6 dB) and no clicks at boundaries, loop wraps or jumps; sends fall back to a private bus without fx. Hands-on (by ear, an effect in a send) still to do |
 | 7 | Region voices + MIDI triggers (note→region mapping and learn, choke groups, one-shot/gate/loop modes). *Deferred (2026-11-20); plan in §2.4* | 4-voice polyphony from MIDI with instant attack |
 | 8 | ✅ **Collection view, split-file reels, wall-clock time** (2026-11-20, Pi 3; see §9.1) | done: a sine split into 3 WAV parts plays across every boundary without a phase jump (forward, reverse, 2×, seek next to it, loop over it); a stereo FLAC reel passes the transport test; join, relink and the start time work from the UI; export has the time of day. Hands-on still to do |
-| 9 | Grid; aurotate's own effects (voice transformation) in the per-voice insert slot | — |
+| 9 | ✅ **Downloads by URL and from Freesound** (§6.9; 2026-11-20, Pi 3, against a mock Freesound; see §9.1) | a WAV and an mp3 by URL, a Freesound id as preview (API key) and as original (OAuth2 login) become tapes with their source; credit line in the popup and in notes.md |
+| 10 | Grid; aurotate's own effects (voice transformation) in the per-voice insert slot | — |
 
 Suggested layout:
 ```
@@ -591,7 +760,7 @@ lib/ui/regions.lua  settings.lua  popup.lua
 
 ## 9. Development notes (read this first in a new session)
 
-### 9.1 State of the code (phases 1–8)
+### 9.1 State of the code (phases 1–9)
 | file | status |
 |---|---|
 | `lib/model.lua` | Phase 4. The document (§3, without `snd`/`midi` yet): `marks` sorted by `t`, `regions` by `t0`, ids `m<n>`/`r<n>` from one `next_id`, times rounded to 1 ms. Queries: `innermost`, `regions_at` (outermost first, for §3's mixing), `mark_near`, `at` (a mark within tolerance wins over the region it sits in). Every change goes through it and calls `Model.changed`. `validate` runs migrations (`Model.migrations[v]`, none yet), drops malformed items and counts them, keeps `next_id` above every id. Pure Lua, no norns calls |
@@ -621,6 +790,12 @@ lib/ui/regions.lua  settings.lua  popup.lua
 | `lib/collection.lua` | Phase 8. The index (`collection.lua` in the data dir): `load` (bootstraps from `Store.all_docs`), `update`, `from_doc`, `rename`, `remove`, `sorted`, debounced `tick`/`flush`; `strip(peaks, n)` reads only the coarsest peaks level |
 | `lib/shelf.lua` | Phase 8. Glue for the collection: `missing`, `candidates`, `join` (writes the reel, carries notes with `Model.append`, swaps the index entries, reopens if a part was open), `find_moved` (`find` under dust/audio by name + size), `relink` (`Store.move` + renames the analysis cache), `forget`, `split_hint` |
 | `lib/ui/collection.lua`, `lib/ui/tape_popup.lua` | Phase 8. The collection page and its tape popup (§4.2). The popup reuses `Popup.frame_box/title/GEOM` |
+| `lib/download.lua` | Phase 9. The queue (one job at a time in a clock coroutine), shell steps as detached jobs through norns-deps' runner (polled every 0.25 s, curl's `-#` percent as progress, cancel kills the process group), `fetch` (curl into a hidden temp folder next to the destination), `finish` (sniff, sox/ffmpeg to FLAC 48 k, unique name, sidecar, tape document with `source` + first note, collection entry), the Freesound flow (metadata → refresh if expired → original, or the hq-ogg preview without a login or after a 401), `downloads.txt`, the login exchange. Loads norns-deps lazily (`D.deps()`); curl/ffmpeg are checked when needed |
+| `lib/freesound.lua` | Phase 9. `freesound.lua` (mode 600) load/save, state (`no key` / `key only` / `waiting for code` / `logged in`), the authorize link + `freesound_login.txt`, request builders → curl config text, `take_token` (expiry − 60 s, rotated refresh token saved at once), `clean_code` (accepts a pasted redirect URL). No network |
+| `lib/source.lua`, `lib/json.lua`, `lib/pkce.lua` | Phase 9. Pure: requests (`freesound:n`, digits, sound links, http/https), file names (Content-Disposition incl. `filename*`, URL path, `safe`, `unique`), headers of the last response, `sniff`, licenses (CC URL → name → short), `from_freesound`, credit line, sidecar, first note, `clean` (for `Model.validate`); a JSON decoder (`Json.null`); SHA-256 + base64url + PKCE |
+| `lib/deps.lua`, `lib/deps/` | Phase 9. Vendored norns-deps (`7a03590` + the dash `kill` fix below) |
+| `lib/ui/add_popup.lua` | Phase 9. The collection's *+ add a tape*: file, url, freesound, queue, login, api key, client id |
+| `tools/freesound_mock.py` | Phase 9. A mock of the API v2 parts we use (sound instance, download → redirect, authorize, access_token with PKCE check and refresh rotation, `/revoke`) plus plain files (redirect, Content-Disposition, 404, HTML, a slow file for cancel) |
 | `test/reel.lua`, `tools/reel_check.py` | Phase 8. `reel_test()` records the split sine (§9.2) across its part boundaries; the script finds every boundary crossing in the position log and checks the second difference there (a misread jumps the sine's phase) |
 
 **Phase 2 result** (shield, Pi 3B+, 64 s ring, fx rack + mods; `field_L.flac`,
@@ -861,6 +1036,47 @@ tapes, hand-set start wins). The tape popup's start row is called *start*
 (not *recorded*), shown to the minute; its source (FROM FILE / BY HAND) is
 in the popup title.
 
+**Phase 9 result** (2026-11-20, shield, Pi 3B+, 260616; `tools/freesound_mock.py`
+on the desktop over the LAN, so no real Freesound account was used):
+
+| | |
+|---|---|
+| `lua5.3 test/model_test.lua`, `notes_test()` | 169 / 169 (phase 8: 110): JSON, SHA-256 / PKCE (RFC 7636 B), requests, names, headers, sniff, licenses, a sound-instance fixture → source, credit, sidecar, first note, validate, `set_source`, export, collection author/license, the token store (mode 600, pending 10 min, expiry, refresh rotation, same key keeps the login) |
+| URL: WAV, mp3, redirect, Content-Disposition | WAV kept as is; mp3 → FLAC 48 kHz (ffmpeg); final URL after the redirect in the sidecar; `"Field Take 1.WAV"` → `Field_Take_1.wav`; a second copy → `tone-2.wav` |
+| URL: HTML page, 404 | `not audio (html)`, `not found (404)`; nothing left behind |
+| Freesound, key only | metadata + `preview-hq-ogg` → FLAC 48 kHz stereo, document with `source` and the first note (description with the HTML stripped, tags, credit), sidecar; an unknown id: `no sound 999` |
+| login | the link in `freesound_login.txt`; a wrong code refused (`bad code or verifier`); the code pasted as the whole redirect URL accepted; the mock checked `S256(verifier)` against the challenge; the file is removed after |
+| original, refresh, revoke | original aif → FLAC; with `expires` in the past: refreshed first, the new refresh token in `freesound.lua` at once; revoked: 401 → tokens cleared, `log in again`, falls back to the preview |
+| cancel | a slow 77 MB download cancelled at 2 %: curl gone, no temp folder |
+| queue file | the good line fetched, the bad one rewritten as `# not understood: …` |
+| UI (screenshots) | add popup, download rows (arrow, %, queued, failed with its reason), the tape popup's source row and credit view; a downloaded tape opens, analyses (1 s for 12 s) and shows its first note |
+
+Fixed while testing:
+- **Cancel didn't kill anything:** `kill -TERM -- -<pgid>` is an error in
+  dash (`/bin/sh` on the device; `--` isn't accepted), so only the outer
+  shell died and curl kept writing into the deleted temp file. Now
+  `kill -TERM -<pgid>`, in the vendored runner, in `../norns-deps` (not
+  committed there yet), and in `lib/analysis.lua`, which had the same bug
+  since phase 2 (stopping an analysis left sox / aurpeaks running).
+
+**Open after phase 9:**
+- **A real Freesound account**: everything above ran against the mock. Check
+  the real authorize page (does it show the code with the registered
+  redirect URI?), whether the token request wants `client_secret` with PKCE,
+  the 24 h expiry, and a real original (wav/flac/mp3) and preview.
+- **Beta quirk:** on this 260616 build an `os.execute` from inside a clock
+  coroutine leaves a stale event, and the *next* script load prints
+  `clock.lua:62: bad argument #1 to 'resume' (thread expected)` (harmless;
+  the script loads). Downloads run their shell steps from the worker
+  coroutine, so it shows after any download. A bare
+  `clock.run(function() os.execute('true') end)` reproduces it; from a metro
+  it doesn't. Not seen on stable; if it matters, launch jobs from a metro.
+- The same sound downloaded twice is a second tape (`-2`); a preview isn't
+  replaced when the original comes later.
+- No search, no packs (§6.9 settled). No `credits.md` over the collection yet.
+- textentry on the device for a long URL: only tried with the REPL; a USB
+  keyboard is the realistic way.
+
 **Open after phase 8:**
 - **Hands-on on the device**: the collection page and popup, join on real
   recorder files (Zoom / Sound Devices / Tascam naming and bext), the wall
@@ -974,6 +1190,13 @@ per-voice inserts, fx rack.
   `scp we@10.0.0.138:dust/data/aurotate/name.png .` and crop (64, 64, 576, 320).
   Force the focus look with `dbg.Tape.focusing = function() return true end`
   and `dbg.Tape.st.proxy_share = 1` in the same REPL chunk as `dbg_shot`.
+- Downloads: `python3 -I tools/freesound_mock.py <dir> <desktop ip>` with
+  test files in `<dir>` (see the script's header), then on the device
+  `dbg.Download.FS.cfg.base = 'http://<ip>:8765'` and the mock's key and
+  client id; `download(…)`, `downloads()`, `freesound_login()`,
+  `freesound_code('GOODCODE')`. Afterwards remove `freesound.lua`,
+  `dust/audio/aurotate/`, the test tapes' documents and caches, and their
+  collection entries.
 - Reels: `reel_test()` (~1 min), then `scp` `dust/audio/aurotate-spike/reel.wav`
   and `dust/data/aurotate/reel_events.txt` and run `tools/reel_check.py`
   (numpy, scipy). `transport_test(path, …)` takes a `.reel` path too.

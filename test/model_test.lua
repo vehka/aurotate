@@ -390,6 +390,147 @@ function T.run(dir)
   check('md parts', emd:find('  - part 2: `/x/b.wav`', 1, true) ~= nil)
   check('md wall meta', emd:find('mark 0:01:40.000 · 2025-08-03 14:01:40', 1, true) ~= nil)
 
+  -- phase 9: JSON
+  local Json = include 'lib/json'
+  local jv = Json.decode('{"a": [1, 2.5, -3e2, true, false, null], "s": "x\\"\\u00e4\\ud83d\\ude00\\n", "o": {}}')
+  check('json decode', jv and jv.a[1] == 1 and math.type(jv.a[1]) == 'integer' and jv.a[2] == 2.5 and jv.a[3] == -300
+    and jv.a[4] == true and jv.a[5] == false and jv.a[6] == Json.null and next(jv.o) == nil)
+  check('json string', jv and jv.s == 'x"ä😀\n', jv and jv.s)
+  check('json errors', Json.decode('{"a": }') == nil and Json.decode('[1,') == nil and Json.decode('1 2') == nil
+    and Json.decode('"abc') == nil)
+  check('json null val', Json.val(Json.null) == nil and Json.val(0) == 0)
+  -- SHA-256 and PKCE (RFC 7636 appendix B)
+  local Pkce = include 'lib/pkce'
+  check('sha256 empty', Pkce.hex(Pkce.sha256('')) == 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
+  check('sha256 abc', Pkce.hex(Pkce.sha256('abc')) == 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
+  check('sha256 two blocks', Pkce.hex(Pkce.sha256(('a'):rep(1000))) ==
+    '41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3')
+  local rfc = string.char(116, 24, 223, 180, 151, 153, 224, 37, 79, 250, 96, 125, 216, 173, 187, 186, 22, 212, 37, 77,
+    105, 214, 191, 240, 91, 88, 5, 88, 83, 132, 141, 121)
+  check('pkce verifier', Pkce.verifier(rfc) == 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk', Pkce.verifier(rfc))
+  check('pkce challenge', Pkce.challenge('dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk')
+    == 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM')
+  check('b64url padding', Pkce.b64url('f') == 'Zg' and Pkce.b64url('fo') == 'Zm8' and Pkce.b64url('foo') == 'Zm9v')
+  -- requests, names, headers, types
+  local Source = include 'lib/source'
+  local r1 = Source.parse_request(' freesound:12345 ')
+  check('req freesound', r1 and r1.kind == 'freesound' and r1.id == 12345)
+  check('req digits', Source.parse_request('678').id == 678)
+  check('req link', Source.parse_request('https://freesound.org/people/someone/sounds/4321/').id == 4321)
+  check('req short link', Source.parse_request('https://freesound.org/s/99/').id == 99)
+  local r2 = Source.parse_request('https://example.org/a%20b.wav?x=1')
+  check('req url', r2 and r2.kind == 'url' and r2.url == 'https://example.org/a%20b.wav?x=1')
+  check('req bad', Source.parse_request('ftp://x/y') == nil and Source.parse_request('# c') == nil
+    and Source.parse_request('http://a b') == nil and Source.parse_request('file:///etc/passwd') == nil)
+  check('name from url', Source.name_from({}, 'https://example.org/dir/a%20b.wav?x=1') == 'a b.wav')
+  check('name from cd', Source.name_from({ ['content-disposition'] = 'attachment; filename="rec 1.WAV"' }, 'https://x/y')
+    == 'rec 1.WAV')
+  check('name from cd*', Source.name_from({ ['content-disposition'] = "attachment; filename*=UTF-8''h%C3%A4.flac" },
+    'https://x/y') == 'hä.flac')
+  check('name cd path stripped', Source.name_from({ ['content-disposition'] = 'attachment; filename="../../x.wav"' }, '')
+    == 'x.wav')
+  check('name none', Source.name_from({}, 'https://example.org/') == nil)
+  check('safe', Source.safe('../hä llo!.wav') == 'h_llo_.wav', Source.safe('../hä llo!.wav'))
+  check('split ext', select(2, Source.split_ext('a.b.WAV')) == 'wav' and Source.split_ext('noext') == 'noext')
+  local taken = { ['/d/x.wav'] = true, ['/d/x-2.wav'] = true }
+  check('unique', Source.unique('/d/', 'x', 'wav', function(p) return taken[p] end) == '/d/x-3.wav')
+  local hh = Source.parse_headers('HTTP/1.1 302 Found\r\nLocation: /b\r\n\r\nHTTP/2 200\r\ncontent-type: audio/wav\r\n'
+    .. 'Last-Modified: Tue, 01 Jan 2030 00:00:00 GMT\r\n\r\n')
+  check('headers last response', hh.status == 200 and hh['content-type'] == 'audio/wav' and hh.location == nil
+    and hh['last-modified'] == 'Tue, 01 Jan 2030 00:00:00 GMT')
+  check('sniff', Source.sniff('RIFF\0\0\0\0WAVEfmt ') == 'wav' and Source.sniff('fLaC\0\0') == 'flac'
+    and Source.sniff('OggS\0\2') == 'ogg' and Source.sniff('ID3\4\0') == 'mp3' and Source.sniff('\255\251\144\0') == 'mp3'
+    and Source.sniff('\0\0\0\24ftypM4A ') == 'm4a' and Source.sniff('FORM\0\0\0\0AIFF') == 'aiff'
+    and Source.sniff('  <!DOCTYPE html>') == 'html' and Source.sniff('{"detail"') == 'json' and Source.sniff('abcd') == nil)
+  check('how', Source.how('wav') == 'keep' and Source.how('ogg') == 'sox' and Source.how('mp3') == 'ffmpeg'
+    and Source.how('html') == nil)
+  check('license names', Source.license_name('http://creativecommons.org/licenses/by/4.0/') == 'Attribution 4.0'
+    and Source.license_name('https://creativecommons.org/licenses/by-nc/3.0/') == 'Attribution NonCommercial 3.0'
+    and Source.license_name('http://creativecommons.org/publicdomain/zero/1.0/') == 'Creative Commons 0')
+  check('license short', Source.license_short('Attribution NonCommercial 4.0') == 'CC BY-NC 4.0'
+    and Source.license_short('Attribution 3.0') == 'CC BY 3.0' and Source.license_short('Creative Commons 0') == 'CC0'
+    and Source.license_short('Sampling+') == 'Sampling+')
+  check('noncommercial', Source.noncommercial('Attribution NonCommercial 4.0') and not Source.noncommercial('Attribution 4.0'))
+  -- a Freesound sound instance (as the API returns it) -> source
+  local fixture = Json.decode([[{"id": 12345, "url": "https://freesound.org/people/fieldrec/sounds/12345/",
+    "name": "harbour wind.wav", "tags": ["wind", "harbour", "field-recording"],
+    "description": "Wind at the <a href=\"x\">harbour</a>.<br />Zoom H5 &amp; windjammer.",
+    "geotag": "60.15 24.95", "created": "2024-03-01T10:20:30", "license": "http://creativecommons.org/licenses/by/4.0/",
+    "type": "wav", "channels": 2, "filesize": 5292044, "bitrate": 0, "bitdepth": 16, "duration": 30.0,
+    "samplerate": 44100, "username": "fieldrec", "pack": null, "md5": "abc123",
+    "previews": {"preview-hq-ogg": "https://cdn.freesound.org/previews/12/12345_1-hq.ogg"}}]])
+  local src = Source.from_freesound(fixture, 'preview-hq-ogg', 1700000000, Json.null)
+  check('fs source', src.kind == 'freesound' and src.author == 'fieldrec' and src.license == 'Attribution 4.0'
+    and src.freesound.id == 12345 and src.freesound.pack == nil and src.freesound.original.samplerate == 44100
+    and #src.freesound.tags == 3)
+  check('fs description plain', src.freesound.description == 'Wind at the harbour.\nZoom H5 & windjammer.',
+    src.freesound.description)
+  check('credit', Source.credit(src) == '"harbour wind.wav" by fieldrec (https://freesound.org/s/12345/), Attribution 4.0',
+    Source.credit(src))
+  check('credit url', Source.credit({ kind = 'url', url = 'https://x/y.wav' }) == 'https://x/y.wav, license unknown',
+    Source.credit({ kind = 'url', url = 'https://x/y.wav' }))
+  check('title', Source.title('wind.WAV') == 'wind' and Source.title('Dr. Smith') == 'Dr. Smith' and Source.title('v1.2') == 'v1.2')
+  check('stem', Source.freesound_stem(src.freesound) == '12345-fieldrec-harbour_wind', Source.freesound_stem(src.freesound))
+  local side = Source.sidecar(src)
+  check('sidecar', side:find('^"harbour wind.wav" by fieldrec') and side:find('freesound file: preview-hq-ogg', 1, true)
+    and side:find('tags: wind harbour field-recording', 1, true) and side:find('original: wav, 44100 Hz, 2 ch', 1, true))
+  local label, note = Source.first_note(src)
+  check('first note', label == 'harbour wind.wav' and note:find('^Wind at the harbour') and note:find('tags: wind', 1, true)
+    and note:find('Attribution 4.0', 1, true))
+  -- validate keeps the source, drops a bad one
+  local sd = Model.new('/x/fs.flac', 30, 1)
+  sd.tape.source = src
+  local vd = Model.validate(load('return ' .. Store.serialise_value(sd))())
+  check('validate source', vd.tape.source and vd.tape.source.freesound.id == 12345
+    and vd.tape.source.freesound.tags[2] == 'harbour' and vd.tape.source.author == 'fieldrec')
+  sd.tape.source = { kind = 'freesound', freesound = { id = 'x' } }
+  check('validate bad source', Model.validate(sd).tape.source == nil)
+  sd.tape.source = nil
+  Model.set_source(sd, 'author', 'someone')
+  check('set_source', sd.tape.source.kind == 'url' and sd.tape.source.author == 'someone')
+  -- export credits it
+  sd.tape.source = Source.clean(src)
+  local smd = Export.markdown(sd, { now = 0 })
+  check('md source', smd:find('- source: "harbour wind.wav" by fieldrec (https://freesound.org/s/12345/), Attribution 4.0',
+    1, true) and smd:find("Freesound's preview-hq-ogg, not the original", 1, true))
+  -- the collection carries author and license
+  local ce = Collection.from_doc(sd)
+  check('collection author', ce.author == 'fieldrec' and ce.license == 'Attribution 4.0')
+  -- Freesound credentials and tokens
+  local FS = include 'lib/freesound'
+  FS.init(dir, Store)
+  check('fs no key', FS.state(0) == 'no key')
+  FS.set('api_key', 'KEY')
+  FS.set('client_id', 'CID')
+  check('fs key only', FS.state(0) == 'key only' and FS.can_login())
+  local mode = io.popen("stat -c %a '" .. FS.path() .. "'"):read('l')
+  check('fs file private', mode == '600', mode)
+  local rnd = function(n) return ('\1'):rep(n) end
+  local url = FS.login_start(1000, rnd)
+  check('fs authorize url', url and url:find('client_id=CID', 1, true) and url:find('code_challenge_method=S256', 1, true)
+    and url:find('code_challenge=' .. Pkce.challenge(Pkce.verifier(('\1'):rep(32))), 1, true), url)
+  check('fs pending', FS.state(1000 + 599) == 'waiting for code' and FS.state(1000 + 601) == 'key only')
+  check('fs login file', io.open(FS.login_path()) ~= nil)
+  check('fs clean code', FS.clean_code(' abc ') == 'abc'
+    and FS.clean_code('https://freesound.org/x/?code=XyZ&state=1') == 'XyZ')
+  local conf = FS.curl_config({ url = 'https://a/b', headers = { 'Authorization: Token K"\\' }, data = { { 'code', 'a b' } } })
+  check('fs curl config', conf == 'url = "https://a/b"\nheader = "Authorization: Token K\\"\\\\"\ndata-urlencode = "code=a b"\n',
+    conf)
+  check('fs bad token', not FS.take_token({ error = 'invalid_grant' }, 1000))
+  check('fs take token', FS.take_token({ access_token = 'A1', refresh_token = 'R1', expires_in = 86400 }, 1000)
+    and FS.state(1000) == 'logged in' and FS.cfg.pending == nil and io.open(FS.login_path()) == nil)
+  check('fs token valid', FS.token_valid(FS.cfg, 1000 + 86000) and not FS.needs_refresh(FS.cfg, 1000 + 86000))
+  check('fs needs refresh', FS.needs_refresh(FS.cfg, 1000 + 86400))
+  FS.take_token({ access_token = 'A2', refresh_token = 'R2', expires_in = 86400 }, 90000)
+  FS.load()
+  check('fs refresh saved', FS.cfg.refresh_token == 'R2' and FS.cfg.access_token == 'A2')
+  local rr = FS.refresh_request()
+  check('fs refresh request', rr.data[3][2] == 'refresh_token' and rr.data[4][2] == 'R2' and rr.data[2][2] == 'KEY')
+  FS.set('api_key', 'KEY')
+  check('fs same key keeps login', FS.logged_in())
+  FS.clear_tokens()
+  check('fs cleared', FS.state(0) == 'key only')
+
   print(string.format('model_test: %d passed, %d failed', passes, fails))
   if fails == 0 then rm_rf(dir) end
   return fails

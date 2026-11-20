@@ -2,8 +2,8 @@
 -- an audio-anthropology workbench:
 -- hours-long recordings on tape
 --
--- phase 8: collection, reels,
--- wall clock
+-- phase 9: downloads by URL
+-- and from Freesound
 --
 -- E1 zoom
 -- K1+E1 page
@@ -30,7 +30,11 @@
 -- collection page (K1+E1 left):
 -- E2 select, E3 sort, K3 open
 -- K1+K3 tape: start time, join
--- split files, relink, forget
+-- split files, relink, forget,
+-- source (downloads)
+-- last row: add a tape (file,
+-- URL, Freesound id, queue file
+-- downloads.txt, Freesound login)
 --
 -- tape: K3 or PARAMS > TAPE
 
@@ -48,6 +52,8 @@ local RS = include 'lib/region_sound'
 local Shelf = include 'lib/shelf'
 local Coll = include 'lib/ui/collection'
 local TapePopup = include 'lib/ui/tape_popup'
+local Download = include 'lib/download'
+local AddPopup = include 'lib/ui/add_popup'
 
 local st = Tape.st
 local shift = false
@@ -90,6 +96,7 @@ local function goto_page(name)
   end
   Popup.reset()
   TapePopup.reset()
+  AddPopup.reset()
   if PAGES[page] == 'regions' then Regions.enter() end
   if PAGES[page] == 'collection' then Coll.enter() end
   Tape.dirty = true
@@ -98,7 +105,24 @@ end
 function init()
   Annot.init(Tape, View)
   Shelf.init(Tape, Annot)
-  Coll.init(Tape, Annot, Shelf, View)
+  Download.init({ data_dir = norns.state.data, audio_dir = _path.audio .. 'aurotate/',
+    Store = Annot.Store, Model = Annot.Model, Collection = Annot.Collection })
+  Download.on_done = function(job)
+    View.message('DOWNLOADED' .. (job.preview and ' (PREVIEW)' or ''), 3)
+    Coll.select_path(job.path)
+    Tape.dirty = true
+  end
+  Download.on_fail = function(job)
+    View.message(('DOWNLOAD: ' .. tostring(job.err)):upper(), 3)
+    Tape.dirty = true
+  end
+  Coll.init(Tape, Annot, Shelf, View, Download)
+  AddPopup.init(Tape, Popup, Download)
+  AddPopup.on_file = function() choose_tape() end
+  AddPopup.on_message = function(msg, secs)
+    View.message(msg, secs)
+    Tape.dirty = true
+  end
   TapePopup.init(Tape, Annot, Shelf, Popup)
   TapePopup.on_done = function(msg, path)
     View.message(msg, 2)
@@ -118,9 +142,10 @@ function init()
     move = function(d) Coll.move(d) end,
     open = function()
       local r = Coll.open()
-      if r == 'add' then choose_tape() elseif r then goto_page('tape') end
+      if r == 'add' then AddPopup.open() elseif r then goto_page('tape') end
     end,
-    busy = function() return TapePopup.active() or TapePopup.modal or Popup.modal end,
+    busy = function() return TapePopup.active() or TapePopup.modal or Popup.modal or AddPopup.active()
+      or AddPopup.modal end,
   }
   Tape.on_opened = function()
     Annot.opened()
@@ -149,7 +174,8 @@ function init()
   redraw_metro = metro.init(function()
     Annot.tick()
     RS.tick()
-    if selecting or Popup.modal or TapePopup.modal then return end
+    if Download.tick() then Tape.dirty = true end
+    if selecting or Popup.modal or TapePopup.modal or AddPopup.modal or Download.installing then return end
     if View.tick() then Tape.dirty = true end
     if Popup.tick() then Tape.dirty = true end
     if Tape.dirty then
@@ -169,15 +195,17 @@ function key(n, z)
   if PAGES[page] == 'collection' then
     if TapePopup.active() then
       TapePopup.key(n, z, shift)
+    elseif AddPopup.active() then
+      AddPopup.key(n, z)
     elseif z == 1 and n == 2 then
       Tape.toggle()
     elseif z == 1 and n == 3 then
-      if shift then
-        local e = Coll.selected()
-        if e then TapePopup.open(e) else choose_tape() end
+      local e = Coll.selected()
+      if shift and e then
+        TapePopup.open(e)
       else
         local r = Coll.open()
-        if r == 'add' then choose_tape() elseif r then goto_page('tape') end
+        if r == 'add' then AddPopup.open() elseif r then goto_page('tape') end
       end
     end
     Tape.dirty = true
@@ -221,6 +249,7 @@ function enc(n, d)
     if page ~= was then
       Popup.reset() -- a popup belongs to the page it was opened on
       TapePopup.close()
+      AddPopup.close()
       if PAGES[page] == 'regions' then Regions.enter() end
       if PAGES[page] == 'collection' then Coll.enter() end
     end
@@ -230,6 +259,8 @@ function enc(n, d)
   if PAGES[page] == 'collection' then
     if TapePopup.active() then
       if n ~= 1 then TapePopup.enc(n, d, shift) end
+    elseif AddPopup.active() then
+      if n ~= 1 then AddPopup.enc(n, d) end
     elseif n == 2 then
       Coll.move(d)
     elseif n == 3 then
@@ -277,6 +308,7 @@ function redraw()
   elseif PAGES[page] == 'collection' then
     Coll.redraw(page, #PAGES)
     TapePopup.redraw()
+    AddPopup.redraw()
     screen.update()
   elseif PAGES[page] == 'regions' then
     Regions.redraw(page, #PAGES)
@@ -341,10 +373,33 @@ function clicks_test(path)
   return include('test/transport').clicks(Tape, path)
 end
 
+-- downloads (lib/download.lua): download('https://…'),
+-- download('freesound:12345'); downloads() lists the queue
+function download(line)
+  local job, err = Download.request(line, 'repl')
+  if not job then print('aurotate: not queued: ' .. tostring(err)) end
+  return job
+end
+function downloads()
+  for i, j in ipairs(Download.jobs) do
+    print(i, j.line, j.state, j.progress and string.format('%.0f%%', j.progress * 100) or '', j.err or '')
+  end
+  print('freesound: ' .. Download.FS.state(os.time()) .. ', queue file: ' .. Download.queue_count())
+end
+-- the Freesound login: freesound_login() prints the link (and writes
+-- freesound_login.txt), freesound_code('…') finishes it
+function freesound_login()
+  local url, err = Download.login_start()
+  if not url then print('aurotate: ' .. tostring(err)) end
+end
+function freesound_code(code)
+  Download.login_code(code, function(ok, msg) print('aurotate: freesound login: ' .. tostring(msg)) end)
+end
+
 -- REPL handles: dbg.Tape, dbg.View; dbg_shot(name) redraws and saves the
 -- screen to dust/data/aurotate/<name>.png
 dbg = { Tape = Tape, View = View, Annot = Annot, Popup = Popup, Keys = Keys, Regions = Regions, RS = RS,
-  Shelf = Shelf, Coll = Coll, TapePopup = TapePopup }
+  Shelf = Shelf, Coll = Coll, TapePopup = TapePopup, Download = Download, AddPopup = AddPopup }
 -- REPL: dbg_page('regions') shows a page
 function dbg_page(name)
   goto_page(name)
@@ -361,6 +416,7 @@ end
 
 function cleanup()
   if redraw_metro then redraw_metro:stop() end
+  Download.cleanup()
   Annot.cleanup()
   Tape.cleanup()
 end
