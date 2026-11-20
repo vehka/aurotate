@@ -532,6 +532,121 @@ function T.run(dir)
   FS.clear_tokens()
   check('fs cleared', FS.state(0) == 'key only')
 
+  -- arranger (lib/arrange.lua): sequencer, editing, validation
+  do
+    local Arr = include 'lib/arrange'
+    local ad = Model.new('/x/arr.wav', 100, 1)
+    local ma = Model.add_mark(ad, 10)   -- m1: 10 -> 12 (next region start)
+    local ra = Model.add_region(ad, 12, 14) -- r2
+    local mb = Model.add_mark(ad, 20)   -- m3: 20 -> 30 (next mark)
+    local mc = Model.add_mark(ad, 30)   -- m4: 30 -> 100 (the end)
+    local function run(rows, from, max)
+      local s = Arr.start(rows, ad, from or 1)
+      local out = {}
+      for _ = 1, max or 50 do
+        local sp = Arr.step(s)
+        if not sp then break end
+        out[#out + 1] = string.format('%g-%g@%g', sp.a, sp.b, sp.rate)
+      end
+      return table.concat(out, ' '), s
+    end
+    check('arr mark span', select(2, Arr.item_span(ad, ma)) == 12 and select(2, Arr.item_span(ad, mb)) == 30
+      and select(2, Arr.item_span(ad, mc)) == 100)
+    local r = run({ { k = 'play', id = 'r2', rep = 2, rate = 1 }, { k = 'play', id = 'm3', rep = 1, rate = -2 } })
+    check('arr rep + rate', r == '12-14@1 12-14@1 20-30@-2', r)
+    r = run({ { k = 'play', id = 'r2', rep = 1, rate = 1 }, { k = 'halt' }, { k = 'play', id = 'm1', rep = 1, rate = 1 } })
+    check('arr halt', r == '12-14@1', r)
+    r = run({ { k = 'play', id = 'r2', rep = 1, rate = 1 }, { k = 'play', id = 'm1', rep = 1, rate = 1 } }, 2)
+    check('arr from row', r == '10-12@1', r)
+    -- loop: rows 0-1 three times in all, then row 3
+    r = run({ { k = 'play', id = 'm1', rep = 1, rate = 1 }, { k = 'play', id = 'r2', rep = 1, rate = 1 },
+      { k = 'loop', to = 0, n = 3 }, { k = 'play', id = 'm3', rep = 1, rate = 1 } })
+    check('arr loop n', r == '10-12@1 12-14@1 10-12@1 12-14@1 10-12@1 12-14@1 20-30@1', r)
+    -- nested: inner (row 1) x2 inside outer (rows 0-2) x2: A B B A B B C
+    r = run({ { k = 'play', id = 'm1', rep = 1, rate = 1 }, { k = 'play', id = 'r2', rep = 1, rate = 1 },
+      { k = 'loop', to = 1, n = 2 }, { k = 'loop', to = 0, n = 2 }, { k = 'play', id = 'm3', rep = 1, rate = 1 } })
+    check('arr nested loops', r == '10-12@1 12-14@1 12-14@1 10-12@1 12-14@1 12-14@1 20-30@1', r)
+    -- forever
+    r = run({ { k = 'play', id = 'r2', rep = 1, rate = 1 }, { k = 'loop', to = 0, n = 0 } }, 1, 5)
+    check('arr loop forever', r == '12-14@1 12-14@1 12-14@1 12-14@1 12-14@1', r)
+    r = run({ { k = 'jump', to = 2 }, { k = 'play', id = 'm1', rep = 1, rate = 1 }, { k = 'rem', text = 'x' },
+      { k = 'play', id = 'r2', rep = 1, rate = 1 } })
+    check('arr jump + rem', r == '12-14@1', r)
+    -- STOP and WAIT: timed spans; a loop of only a WAIT is not a zero-time loop
+    local function run2(rws, max)
+      local st2 = Arr.start(rws, ad, 1)
+      local out = {}
+      for _ = 1, max or 50 do
+        local sp = Arr.step(st2)
+        if not sp then break end
+        out[#out + 1] = sp.kind and (sp.kind .. sp.secs) or string.format('%g-%g@%g', sp.a, sp.b, sp.rate)
+      end
+      return table.concat(out, ' '), st2
+    end
+    r = run2({ { k = 'play', id = 'r2', rep = 1, rate = 1 }, { k = 'stop', secs = 0.5 }, { k = 'wait', secs = 2 },
+      { k = 'play', id = 'm1', rep = 1, rate = 1 } })
+    check('arr stop + wait', r == '12-14@1 stop0.5 wait2 10-12@1', r)
+    r = run2({ { k = 'wait', secs = 1 }, { k = 'loop', to = 0, n = 0 } }, 3)
+    check('arr wait loop', r == 'wait1 wait1 wait1', r)
+    -- a deleted item is skipped
+    r = run({ { k = 'play', id = 'r99', rep = 1, rate = 1 }, { k = 'play', id = 'm3', rep = 1, rate = 1 } })
+    check('arr missing item', r == '20-30@1', r)
+    -- zero-time guard: a jump to itself, an empty loop
+    local s2
+    r, s2 = run({ { k = 'jump', to = 0 } })
+    check('arr guard jump', r == '' and s2.err == 'NO PLAY ROW', s2.err)
+    r, s2 = run({ { k = 'rem', text = '' }, { k = 'loop', to = 0, n = 0 } })
+    check('arr guard loop', r == '' and s2.err == 'NO PLAY ROW', s2.err)
+    r, s2 = run({ { k = 'play', id = 'r99', rep = 1, rate = 1 }, { k = 'loop', to = 0, n = 0 } })
+    check('arr guard missing', r == '' and s2.err == 'NO PLAY ROW', s2.err)
+    -- short spans are lengthened to MIN_SPAN of playing time
+    local tiny = Model.add_region(ad, 50, 50.06)
+    r = run({ { k = 'play', id = tiny.id, rep = 1, rate = 4 } })
+    check('arr min span', r == '50-50.2@4', r)
+    -- editing: targets follow their rows
+    local rows = Model.arr_rows(ad)
+    Model.arr_insert(ad, 1, Arr.new_row(rows, 1, 'play', 'm1'))
+    Model.arr_insert(ad, 2, Arr.new_row(rows, 2, 'play', 'r2'))
+    Model.arr_insert(ad, 3, Arr.new_row(rows, 3, 'loop'))
+    check('arr loop default to', rows[3].to == 0)
+    Model.arr_insert(ad, 4, Arr.new_row(rows, 4, 'play', 'm3'))
+    Model.arr_insert(ad, 5, Arr.new_row(rows, 5, 'loop'))
+    check('arr loop default after loop', rows[5].to == 3, rows[5].to)
+    Model.arr_insert(ad, 1, Arr.new_row(rows, 1, 'rem'))
+    check('arr insert shifts', rows[4].to == 1 and rows[6].to == 4, rows[4].to .. ' ' .. rows[6].to)
+    Model.arr_delete(ad, 1)
+    check('arr delete shifts', rows[3].to == 0 and rows[5].to == 3)
+    local s3 = Arr.start(rows, ad, 1)
+    Arr.step(s3) -- row 1 played, next is row 2
+    Arr.shift(s3, 1, 1)
+    check('arr shift', s3.row == 3 and s3.cur == 2, s3.row .. ' ' .. tostring(s3.cur))
+    Model.arr_set(ad, 2, 'rate', -0.5)
+    Model.remove(ad, ra) -- the row stays, pointing at nothing
+    check('arr row survives delete', rows[2].id == 'r2')
+    -- validation: a round trip, malformed rows dropped, values clamped
+    local copy = Model.validate({ version = 1, tape = { path = '/x/arr.wav', dur = 100 }, next_id = 9,
+      marks = { { id = 'm1', t = 10, tags = {} } }, regions = {},
+      arr = { rows = { { k = 'play', id = 'r2', rep = 999, rate = -0.6 }, { k = 'loop', to = 40, n = -3 },
+        { k = 'bogus' }, 'x', { k = 'play', id = 7 }, { k = 'rem', text = 'hi' }, { k = 'jump', to = 1.4 },
+        { k = 'halt' }, { k = 'stop', secs = 0.6 }, { k = 'wait' } } } })
+    local cr = copy.arr.rows
+    check('arr validate stop/wait', cr[6].secs == 0.5 and cr[7].k == 'wait' and cr[7].secs == 1)
+    check('arr validate', #cr == 7 and cr[1].rep == 64 and cr[1].rate == -0.5 and cr[2].to == 6 and cr[2].n == 0
+      and cr[3].text == 'hi' and cr[4].to == 1 and cr[5].k == 'halt', #cr)
+    check('arr no arr', Model.validate({ version = 1, marks = {}, regions = {} }).arr == nil)
+    -- through the store
+    local p2 = '/x/arr store.wav'
+    local sd = Store.open(p2, 100, 5)
+    Model.add_mark(sd, 1)
+    Model.arr_insert(sd, 1, Arr.new_row(Model.arr_rows(sd), 1, 'play', 'm1'))
+    Model.arr_insert(sd, 2, { k = 'rem', text = 'a "quoted"\nremark' })
+    Store.flush()
+    Store.close()
+    local back = Store.open(p2, 100, 5)
+    check('arr store round trip', back.arr and #back.arr.rows == 2 and back.arr.rows[2].text == 'a "quoted"\nremark')
+    Store.close()
+  end
+
   print(string.format('model_test: %d passed, %d failed', passes, fails))
   if fails == 0 then rm_rf(dir) end
   return fails

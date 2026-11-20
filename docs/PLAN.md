@@ -1,8 +1,14 @@
-# aurotate: implementation plan (draft 10, phase 9 built; phase 7 deferred)
+# aurotate: implementation plan (draft 12, phase 10 built; next: phase 11, region LFOs)
 
 An audio-anthropology workbench for norns: play recordings hours long on an
 analog-feeling tape, mark points and regions, attach notes and per-region
-sound treatment, trigger regions from MIDI (later grid), export the notes.
+sound treatment, play the tape through an arrangement of regions, export the
+notes; later trigger regions from MIDI and grid.
+
+**Roadmap (reorganised 2026-11-20):** 10 arranger MVP (§4.4) → 11 region
+LFOs (§6.10) → 12 filetags (§6.11) → 13 audio ethnographer (§6.12) → 14
+performance mode: region voices, MIDI clip launching, grid (§6.13; was phase
+7 and 10). See §7.
 
 Target: norns 3.x (the user's fork, fates / Pi 4 first). Two reasons: fx v2
 only runs on 3.x, and the 4TRK UI we borrow from lives there. A Pi 3 (1 GB)
@@ -170,7 +176,7 @@ above the speed where a proxy takes over (11.3× with P1, 90× with P2 only).
   resolution. Until its ring catches up, a voice reads from that cache and
   falls back to the proxy if it has to. *Superseded by the AurVoice plan
   below (2026-11-20).*
-- **Region voices, revised plan (2026-11-20; phase 7 deferred):** not a
+- **Region voices, revised plan (2026-11-20; now phase 14):** not a
   second AurTape per voice. Three reasons, from the phase 6 code:
   - AurTape allocates its proxies per instance (`prApplyProxy`); P1 for a
     2 h tape is 83 MB, so copies per voice don't fit the shield. Shared
@@ -212,8 +218,9 @@ above the speed where a proxy takes over (11.3× with P1, 90× with P2 only).
   - The transport while a voice plays: independent, ducked, or paused?
   - Polyphony: may the same region play twice at once? Choke groups?
   - UI: voice playheads on the tape view; MIDI learn from the region popup.
-  - Priority: voices are for performance; for the ethnographer workflow,
-    the keyboard items and region LFOs in IDEAS.md may matter more.
+  - Priority (decided 2026-11-20): voices are for performance and come
+    last, as phase 14 (§6.13), after the arranger, region LFOs, filetags
+    and the ethnographer workflow.
 - Each voice has an output stage: `gain · pan · tone (tilt EQ) → dry → main bus`,
   `→ sendA`, `→ sendB`.
   - **"send-as-insert"** = dry 0, send 1, with the fx send return set to
@@ -223,7 +230,7 @@ above the speed where a proxy takes over (11.3× with P1, 90× with P2 only).
     when a region's dry is at 0 and its send is empty, because then the
     region is silent.
   - Reserve a **per-voice insert slot** for aurotate's own effects (voice
-    transformation, phase 7). `FxUnit.all` exposes the registered effect
+    transformation, phase 14). `FxUnit.all` exposes the registered effect
     functions, so a voice can instance an fx v2 effect *inside the voice*.
     That makes a true per-region insert, without the global rack.
 - **As built (phase 6):** `lib/sc/AurOut.sc`, one per voice, in a voice group
@@ -244,7 +251,7 @@ above the speed where a proxy takes over (11.3× with P1, 90× with P2 only).
 | region voice rings | 4 × 20 s | 2 × 10 s |
 | region head cache | 64 regions × 3 s | 16 × 3 s |
 
-Show the budget in settings, OP-1-style, as a "tape remaining" style
+Show the budget in PARAMS (or the collection page), OP-1-style, as a "tape remaining" style
 gauge.
 
 ## 3. Data model and persistence (lib/model.lua, lib/store.lua)
@@ -297,7 +304,7 @@ region  = { id, t0, t1, label, note, tags, color,
   apply without a glide for 30 ms (the jump lands in silence). Boundaries
   are thus exact to a control block (measured: ~1 ms between boundaries),
   not to the 20 Hz position poll. Gain −60 dB means off and wins over any
-  added gain. Not built yet: `rate` (region voices, phase 7), inserts, mask.
+  added gain. Not built yet: `rate` (region voices, phase 14), inserts, mask.
 - "Current region" params (`aur_cur_dry`, `aur_cur_send_a`, …) mirror the
   innermost region under the playhead. You can PMAP them to MIDI CCs and edit whatever
   region is playing. This keeps editing params-first (§modern.md), even though
@@ -305,8 +312,9 @@ region  = { id, t0, t1, label, note, tags, color,
 
 ## 4. UI (lib/ui/*)
 
-Four screens, shown as four dots at the top (· ● · ·). **E1 is zoom; K1+E1
-changes screen** (decided). **Popups** are layers about
+Four screens, shown as four dots at the top (· ● · ·): collection · tape ·
+regions · arranger (the arranger takes the place planned for settings,
+§4.4). **E1 is zoom; K1+E1 changes screen** (decided). **Popups** are layers about
 112×52 px with a 1 px bright frame and a dimmed screen behind them.
 
 ### 4.1 Tape view (derived from 4TRK `menu/multitape.lua`)
@@ -388,9 +396,146 @@ joined** (§6.1).
   K1+K2 loop. Popups close on a page change. No ♪ / MIDI columns yet
   (phases 6–7).
 
-### 4.4 Settings
-Budgets, cue/lifter character, transcription rewind, display (offset or
-wall-clock), MIDI channel and mapping mode, and export.
+### 4.4 Arranger (phase 10: MVP; replaces the settings page)
+**Settings stay in PARAMS** (decided 2026-11-20): budgets, cue/lifter
+character, rewind, clock (offset / time of day) and export are already
+there (groups TAPE, SOUND). A settings page can come back later if PARAMS
+gets crowded; the fourth page is the arranger.
+
+The arranger plays the tape *through* a list of rows, like the Octatrack's
+arranger plays patterns: region 3 twice, then the stretch from mark 5 to
+mark 6 backwards at 2×, loop that section four times, jump, stop. It is the
+"script view" in IDEAS.md. Everything that follows the tape position (region
+sound, later LFOs) follows the arrangement for free, because the arrangement
+only moves the transport.
+
+**Rows** (max 256, numbered from 000; played from the selected row down to
+the end, or to a HALT). Each row is either a *play row* or a *command row*.
+
+| column | play row | as on the OT |
+|---|---|---|
+| ROW | 000…255 | ROW |
+| ITEM | a region (plays t0 → t1), or a mark (plays from the mark to the next mark or region start, in tape order) | PAT |
+| REP | 1…64 times; while playing, a countdown of the passes left shows to the right | REP |
+| SPD | rate: the shuttle steps, 1× default; negative plays the span backwards (end → start) | (none; from IDEAS.md: "rev at 2× to marker one") |
+
+**Commands** sit *before the first item* in the ITEM column, as on the OT
+(turn E3 anti-clockwise past the first item): `REM` · `LOOP` · `HALT` ·
+`JUMP`, in that order going left.
+- **HALT**: stop here. The end of the list is an implicit HALT.
+- **LOOP**: go back to a target row, *n* times or forever (∞, default).
+  The target defaults to the row after the nearest earlier LOOP (else row
+  000) and can be changed, like JUMP's. *n* counts passes of the section in
+  all; when they are done, play continues on the next row. **Loops nest**:
+  an inner LOOP's counter resets each time the outer loop goes back over
+  it. (Adaptation: the OT loops to row 000 and nests implicitly; an
+  explicit target is easier to read on a 128 px screen.)
+- **JUMP**: continue at row *r*.
+- **REM**: a text (textentry or the USB keyboard). No time, no effect.
+
+A play row whose item was deleted shows `?` and is skipped. Command rows
+take no time; a run of more than 256 rows without a play row (JUMP to
+itself, an empty LOOP) halts with a header message instead of hanging.
+
+**Data:** in the per-tape document (rows point at region and mark ids), so
+`Model` owns it and saves it like any edit: `doc.arr = { rows = { ... } }`,
+a row `{ k = 'play', id = 'r3', rep = 2, rate = -2 }`, `{ k = 'loop', to =
+4, n = 0 }` (0 = ∞), `{ k = 'jump', to = 0 }`, `{ k = 'halt' }`, `{ k =
+'rem', text = '…' }`. One arrangement per tape in the MVP. A document
+without `arr` is an empty arrangement (no migration needed, but `validate`
+drops malformed rows and clamps targets like any item). The play state
+(row, passes left, loop counters) is not saved.
+
+**Sequencer (`lib/arrange.lua`, pure):** `Arr.start(rows, doc, row)` and
+`Arr.step(state)` → the next span `{ a, b, rate }` (after resolving command
+rows and REP) or `nil` = halt. Tested off the device with
+`test/model_test.lua`, like the model.
+
+**Engine: exact, gapless row ends.** The 20 Hz position poll is too coarse
+for row ends, so the engine plays the span and swaps to the next itself, as
+it already does at loop seams (§9.1, transport design):
+- `arr_span f f f` (a, b, rate: play now) and `arr_next f f f` (what comes
+  after b; Lua sends it as soon as the current span starts). At the span's
+  end the synth jumps to the next span in the same control block and sends
+  a reply (`arr_wrap`); Lua answers with the following `arr_next`. A REP of
+  3 is the same span sent three times. No next = stop at b. `arr_off`
+  leaves arrangement mode.
+- The jump uses the AurOut jump/wrap trigger (§3 as built), so region
+  sound switches without a glide, as at loop wraps.
+- The next span's start is known one span ahead: the feeder can prefetch
+  its first chunks so a jump lands in the ring, not on the proxy. To try in
+  the session: measured far seeks are ≤ 60 ms (§1) and the proxy covers
+  them, so the MVP may do without prefetch; measure clicks and gaps with a
+  recording (as `sound_test`, §9.1). `test3h.wav`'s sweep (frequency =
+  position) shows every jump in a spectrogram.
+- Spans shorter than ~50 ms are lengthened (or skipped) to keep the
+  engine's state machine sane; spans across reel parts work as anywhere.
+
+**Page** (`lib/ui/arranger.lua`; 7 rows in tom-thumb like the regions page):
+`012  r3 arrival story  ×2  -2×` — row number, item (the region square or
+mark tick, then its label as on the regions page), REP, SPD. The focused
+cell is inverted. The playing row has a bar at the left and the countdown
+at the right. A LOOP row shows `LOOP→004 ×4` (`∞`); JUMP `JUMP→000`.
+
+| control | |
+|---|---|
+| E1 | column focus (ITEM · REP · SPD; on commands: target, count, text). E1 has no zoom on this page; K1+E1 still changes page |
+| E2 | select row |
+| E3 | change the focused value |
+| K2 | play the arrangement from the selected row / stop |
+| K3 | on ITEM: move the tape to the item (stopped: just cue it); on a REM text: edit it |
+| K1+K3 | insert a row below (a copy of the selected one; an empty list gets a row playing the item under the playhead) |
+| K1+K2 | delete the row (press twice to confirm) |
+| USB keyboard | Up/Down row, Left/Right column, Shift+Down insert, Shift+Up delete (the OT's FUNCTION+DOWN/UP), Delete too, Enter edits a REM, Space play/stop |
+
+**With the rest of the script:**
+- The tape page shows the arrangement in the header state: `ARR 012 2/4`.
+- Any manual transport move (jog, shuttle, a seek, K2 on the tape page, a
+  page's jump) leaves arrangement mode and keeps the tape where it is; K1+K2
+  loop is off while arranging. (Open: whether a pause/resume of the
+  arrangement is wanted.)
+- Lifter: the lifter cue applies above 2× as on the transport (it is the
+  tape's character); open whether arrangements want a param to bypass it.
+- Not in the MVP: several arrangements per tape, arrangement export
+  (notes.md section, a rendered WAV via NRT), MIDI start/stop or clock,
+  row lengths in beats, crossfades between rows, PSET-linked arrangements.
+
+**Done when:** an arrangement of regions and mark spans with REP, SPD,
+nested LOOPs, JUMP and HALT plays as written; the row ends are exact and
+click-free in a recording (sweep and sine checks); the arrangement survives
+a reload; the page is usable from the keys alone and from a USB keyboard.
+
+**As built (phase 10, 2026-11-20; see §9.1):**
+- **STOP** and **WAIT** rows (added during the build, at the user's
+  request): `{ k = 'stop', secs }` is the brake: the tape rolls on from
+  where the row before ended and spins down linearly to 0 over *secs*
+  (the pitch falls); `{ k = 'wait', secs }` is silence for *secs*. Both
+  are timed in the engine (exact to a control block) and take time, so a
+  LOOP over only a WAIT is not a zero-time loop. Times: 0.05…60 s in steps.
+  ITEM order going left from the first item: WAIT, STOP, REM, LOOP, HALT,
+  JUMP. K2 on a STOP row brakes whatever the transport is doing.
+- Engine: two span slots `[a, b, rate, start, start in ring, continues,
+  duration, ramp]` (`arrA`/`arrB`), played in turn by a counter in the
+  synth's feedback; `arr_span fffiif`, `arr_next fffif`, `arr_hint fff`
+  (the span after next, only prefetched), `arr_off`; poll `aur_arr` (not
+  periodic, `gen * 10000 + spans begun`). A span that starts where the
+  one before ended, in the same direction, *continues*: no jump, no fade,
+  only the speed changes (a slope kink when it changes, 8 × on the 440 Hz
+  yardstick, like the phase 1 scrub kinks; equal speeds are seamless).
+- A tape standing still is faded out (20 ms): PlayBuf at rate 0 held its
+  last sample as DC (since phase 1, after every stop; found at the HALT).
+- Row ends: the switch comes one control block after the crossing (two
+  coming out of reverse), inside the silence after the fade, so the row is
+  heard exactly to its end; the next row lands within ±2 frames of its
+  start. A reverse span starts one quantum (64 frames) below its end.
+- Spans of less than 50 ms of playing time are lengthened (`Arr.MIN_SPAN`).
+- Rows at the page's right: REP shows `x4 3` (passes left) on the playing
+  row; LOOP rows show `LOOP >004 x4` (`INF` for ∞) and, while playing, the
+  pass. Arrows and ∞ are ASCII (tom-thumb lacks them).
+- Editing rows while the arrangement plays keeps the sequencer on its rows
+  (`Arr.shift`); the span the engine already holds plays anyway.
+- Open: pause/resume (no), lifter bypass for arrangements (no; the cue
+  applies above 2× as on the transport).
 
 ### 4.5 Controls (tape view; built in phase 4)
 | | |
@@ -707,6 +852,90 @@ cancelled download leaving no partial file, and the analysis of the result.
 - The popup's *source* row shows the author (and `(preview)`); the license,
   short (`CC BY-NC 4.0`), is in the popup title. The tape font has no `·`.
 
+### 6.10 Region LFOs (phase 11)
+From IDEAS.md: a region's sound can move, e.g. a linear slope of a send from
+0 to 100 % across the region, or a slow pan.
+- **Per region, up to 2 LFOs:** `region.lfo = { { to = 'send_a', shape,
+  depth, sync, period }, … }`. Targets: the `snd` fields (gain, pan, tone,
+  dry, send_a, send_b); `rate` once region voices exist (phase 14).
+- **Shapes** as in the less-concepts fork (`../less-concepts/lib/lfos.lua`):
+  sine, triangle, ramp up, ramp down, square, random (sample & hold).
+- **Sync:**
+  - `tape` (default): the phase is the position inside the region, `(pos −
+    t0) / (t1 − t0)` × cycles. A ramp over the whole region is one cycle.
+    It follows the tape: jog back and the ramp runs back; the arranger's
+    reverse rows (§4.4) play it backwards. This is the IDEAS slope.
+  - `enter`: time-based, restarts when the playhead enters the region.
+  - `free`: time-based, runs from script start.
+  - `play`: time-based, restarts on play.
+  Period: cycles per region for `tape`, seconds for the others.
+- **Where:** in `AurOut`, not Lua. The segments (§3 as built) carry the
+  LFOs of every region covering them with each region's own `t0/t1` (for
+  `tape` sync). The synth already has the position bus, so `tape` sync is
+  sample-accurate and costs no OSC. The modulation adds in the same domain
+  as §3's combination (dB for gain, sums for pan/tone/sends, clipped
+  after). Fixed slots per segment (start with 2; innermost regions win, the
+  UI marks the overflow, like inserts). A crossing still glides (50 ms).
+- **UI:** an LFO row in the item popup (opens a small LFO popup: target,
+  shape, depth, sync, period); the region band on the tape view gets a
+  faint curve of the first LFO; current-region params `aur_cur_lfo1_*` for
+  PMAP. CPU: measure on the shield (a few `LFTri`/`LFNoise0` per AurOut).
+- **Done when:** a ramp over a region is exact to the region's ends at any
+  speed and direction (recording check), the time-synced modes restart as
+  specified, and LFOs survive a reload.
+
+### 6.11 Filetags (phase 12)
+[filetags](https://github.com/novoid/filetags) keeps tags in file names:
+`2025-08-03T14.00.00 interview Kati -- story place.flac` (tags after ` --
+`, separated by spaces; the date stamp prefix is `date2name`'s).
+- **Tape tags** (new): `doc.tape.tags`. Until now tags live on marks and
+  regions only (a Freesound sound's tags go onto its first-note mark,
+  phase 9; decide whether they move to the tape tags, with a migration).
+- **Reading:** when a tape is added or opened, the tags in its file name
+  (a reel: the `.reel` name, plus the parts' tags) are merged into the tape
+  tags. Tags added in aurotate stay in the document; file-name tags are
+  marked as such so a later rename (tag removed) can drop them.
+- **Vocabulary:** filetags' `.filetags` files (one tag per line; in the
+  folder and its parents) are offered in the tag picker beside `tags.lua`.
+- **Date prefix → wall clock:** an ISO date/time prefix gives the tape's
+  start when there is no bext (FLAC, §9.1 open after phase 8), as
+  `source = 'name'`, below bext and a hand-set start.
+- **Collection:** a dot or the first tag in the row, the tags under the
+  overview strip, and filter by tag (E3 cycles sort orders, then tags).
+  `notes.md` lists the tape tags in its header.
+- **Renames:** the path is the tape's identity (§8), so re-tagging a file
+  with filetags breaks the link. Relink (§4.2) should also match the name
+  without its ` -- tags` part, plus size.
+- Writing tags back (renaming files from aurotate) is out of scope for now:
+  renames move documents and caches and break shares; maybe later, opt-in.
+
+### 6.12 Audio ethnographer (phase 13)
+The keyboard workflow for working through interviews, collected from
+IDEAS.md and the open items of phases 4–5:
+- **Keys on the tape page** (outside the note editor): Up/Down previous /
+  next mark or region start; Left/Right cue (REW/FF while held; Shift and
+  Ctrl change the speed); Space play/stop (Esc keeps auto-rewind). Typing a
+  letter still starts a note. Inside the editor the arrows move the cursor
+  and Space types; a modifier (or Esc first) reaches the transport.
+- **Regions page:** Enter opens the selected item in the item popup; Up/Down
+  pick a property and Enter edits it (note → note editor, label →
+  textentry); Space jumps the tape to the item.
+- **Transcription mode** (§6.3): slowdown without pitch change (granular on
+  the ring buffer), auto-rewind on resume.
+- **The rest of phase 5:** Audacity labels, VTT, CSV, excerpts, and the
+  notes.md re-import (5b).
+- Candidates, to choose from then: audio notes (softcut, §2.4), notes on
+  notes, Zotero export, a transcription file alongside.
+- The keyboard-less counterpart, *archipelagic listening* (IDEAS.md), may
+  turn out to be an arranger use (an infinite LOOP over a region).
+
+### 6.13 Performance mode (phase 14; was phases 7 and 10)
+Comes after phases 10–13. Region voices (`AurVoice`, the revised plan and
+open questions in §2.4, budgets in §2.5), **MIDI clip launching** (note →
+region, learn from the region popup, one-shot / gate / loop, choke groups),
+grid, and aurotate's own effects in the per-voice insert slot. Possibly
+arrangement rows launched from MIDI or grid (§4.4).
+
 ## 7. Phases
 
 | # | deliverable | done when |
@@ -718,10 +947,14 @@ cancelled download leaving no partial file, and the analysis of the result.
 | 4 | ✅ **Marks, regions, notes** (2026-11-20, Pi 3; see §9.1): model + tape document store, K3 tap/hold gestures, region bands and mark flags, item popup and note editor, USB keyboard notes and hotkeys | done: annotations survive a script reload, a reboot and PSET switches between two tapes (each with its own notes and position); off-device and on-device store tests pass. Hands-on on the device still to do |
 | 5 | ✅ Regions list + reader popup (2026-11-20); exports: ✅ md, Audacity / VTT / CSV still to do; excerpts still to do | export opens correctly in Audacity and a VTT player |
 | 6 | ✅ **Per-region sound** (2026-11-20, Pi 3; see §9.1): output stage, fx v2 sends, send-as-insert, boundary glides, current-region params | done: `sound_test()` levels exact (−12 dB, mute, hard pan, nested +6 dB) and no clicks at boundaries, loop wraps or jumps; sends fall back to a private bus without fx. Hands-on (by ear, an effect in a send) still to do |
-| 7 | Region voices + MIDI triggers (note→region mapping and learn, choke groups, one-shot/gate/loop modes). *Deferred (2026-11-20); plan in §2.4* | 4-voice polyphony from MIDI with instant attack |
+| 7 | *Moved to phase 14 (2026-11-20)* | — |
 | 8 | ✅ **Collection view, split-file reels, wall-clock time** (2026-11-20, Pi 3; see §9.1) | done: a sine split into 3 WAV parts plays across every boundary without a phase jump (forward, reverse, 2×, seek next to it, loop over it); a stereo FLAC reel passes the transport test; join, relink and the start time work from the UI; export has the time of day. Hands-on still to do |
 | 9 | ✅ **Downloads by URL and from Freesound** (§6.9; 2026-11-20, Pi 3, against a mock Freesound; see §9.1) | a WAV and an mp3 by URL, a Freesound id as preview (API key) and as original (OAuth2 login) become tapes with their source; credit line in the popup and in notes.md |
-| 10 | Grid; aurotate's own effects (voice transformation) in the per-voice insert slot | — |
+| 10 | ✅ **Arranger MVP** (§4.4; 2026-11-20, Pi 3; see §9.1): rows of regions / mark spans with REP and SPD; HALT, LOOP (nested, ∞ or n), JUMP, REM, + STOP (brake) and WAIT; exact row ends in the engine; the fourth page (settings stay in PARAMS) | arrangement plays as written, row ends exact and click-free in a recording, survives a reload, usable from keys and a USB keyboard |
+| 11 | **Region LFOs** (§6.10): 2 per region on the `snd` fields, tape-synced or time-based, in AurOut | a ramp is exact to the region ends at any speed and direction; LFOs survive a reload |
+| 12 | **Filetags** (§6.11): tape tags from file names, `.filetags` vocabulary, date prefix as start, collection filter | a filetags-named folder opens with its tags and starts; the collection filters by them |
+| 13 | **Audio ethnographer** (§6.12): keyboard workflow, transcription mode, remaining exports and re-import | an interview can be worked through from the USB keyboard alone; exports open in Audacity and a VTT player |
+| 14 | **Performance mode** (§6.13; was 7 and 10): region voices, MIDI clip launching, grid, own effects in the insert slot | 2 voices (shield) / 4 (Pi 4) from MIDI with instant attack |
 
 Suggested layout:
 ```
@@ -733,7 +966,8 @@ lib/analysis.lua  lib/cache.lua
 lib/model.lua  lib/store.lua  lib/export.lua
 lib/midi_map.lua  lib/keys.lua (norns keys/encoders + USB keyboard)
 lib/ui/draw.lua  tape_view.lua  overview.lua  collection.lua
-lib/ui/regions.lua  settings.lua  popup.lua
+lib/ui/regions.lua  arranger.lua  popup.lua
+lib/arrange.lua              -- the arranger's sequencer (pure)
 ```
 
 ## 8. Decisions
@@ -766,10 +1000,19 @@ lib/ui/regions.lua  settings.lua  popup.lua
   under `dust/audio`.
 - A tape's start (the wall clock) comes from bext unless set by hand; a
   hand-set one wins and survives reopening.
+- Order after phase 9 (2026-11-20): arranger → region LFOs → filetags →
+  audio ethnographer → performance mode (region voices, MIDI clip
+  launching, grid).
+- The fourth page is the arranger; settings live in PARAMS (§4.4).
+- STOP (brake over a time) and WAIT (silence) rows, timed in the engine
+  (2026-11-20, asked for during phase 10).
+- A stopped tape is silent (faded out), not a held sample.
+- Arrangements are per-tape document data (they point at item ids), one
+  per tape for now; the engine swaps spans itself so row ends are exact.
 
 ## 9. Development notes (read this first in a new session)
 
-### 9.1 State of the code (phases 1–9)
+### 9.1 State of the code (phases 1–10)
 | file | status |
 |---|---|
 | `lib/model.lua` | Phase 4. The document (§3, without `snd`/`midi` yet): `marks` sorted by `t`, `regions` by `t0`, ids `m<n>`/`r<n>` from one `next_id`, times rounded to 1 ms. Queries: `innermost`, `regions_at` (outermost first, for §3's mixing), `mark_near`, `at` (a mark within tolerance wins over the region it sits in). Every change goes through it and calls `Model.changed`. `validate` runs migrations (`Model.migrations[v]`, none yet), drops malformed items and counts them, keeps `next_id` above every id. Pure Lua, no norns calls |
@@ -805,6 +1048,10 @@ lib/ui/regions.lua  settings.lua  popup.lua
 | `lib/deps.lua`, `lib/deps/` | Phase 9. Vendored norns-deps (`7a03590` + the dash `kill` fix below) |
 | `lib/ui/add_popup.lua` | Phase 9. The collection's *+ add a tape*: file, url, freesound, queue, login, api key, client id |
 | `tools/freesound_mock.py` | Phase 9. A mock of the API v2 parts we use (sound instance, download → redirect, authorize, access_token with PKCE check and refresh rotation, `/revoke`) plus plain files (redirect, Content-Disposition, 404, HTML, a slow file for cancel) |
+| `lib/arrange.lua` | Phase 10. Pure: rows (play / loop / jump / halt / rem / stop / wait), `item_span` (a mark plays to the next mark or region start), `start`/`step` (REP, nested LOOP counters, JUMP, missing items skipped, the 256-row zero-time guard, `MIN_SPAN`), `insert`/`delete` (targets follow their rows), `shift` (a running sequencer after an edit), `clean` (validation). `Model.arr_rows/arr_insert/arr_delete/arr_replace/arr_set`; `validate` keeps `doc.arr` |
+| `lib/arranger.lua` | Phase 10. Glue: `start(row)`, `stop`, `leave` (via `Tape.on_manual`: shuttle, scrub, seek, loop on, open), the `aur_arr` poll (playing / queued / after), the header label (`ARR 012 2/4`, `ARR 013 STOP`) |
+| `lib/ui/arranger.lua` | Phase 10. The fourth page (§4.4): cells per row kind, E1 column, E3 values, K3 cue / REM textentry, K1+K3 insert, K1+K2 delete (twice); `Keys.arranger` for the USB keyboard |
+| `test/arrange.lua`, `tools/arrange_check.py` | Phase 10. `arrange_test()` records test3h through 16 spans (REP, reverse, 2× → 1× → 0.5× continuing, nested LOOP, JUMP, REM, a 30 ms region, STOP, WAIT, HALT) and cuts `arrange_ref.wav`; the script finds each span's start by correlating test3h's pink noise, the switch by the run of silent samples, and checks ends, landings, brake, wait, halt and clicks |
 | `test/reel.lua`, `tools/reel_check.py` | Phase 8. `reel_test()` records the split sine (§9.2) across its part boundaries; the script finds every boundary crossing in the position log and checks the second difference there (a misread jumps the sine's phase) |
 
 **Phase 2 result** (shield, Pi 3B+, 64 s ring, fx rack + mods; `field_L.flac`,
@@ -1068,6 +1315,31 @@ Fixed while testing:
   committed there yet), and in `lib/analysis.lua`, which had the same bug
   since phase 2 (stopping an analysis left sox / aurpeaks running).
 
+**Phase 10 result** (2026-11-20, shield, Pi 3B+, 260616):
+
+| | |
+|---|---|
+| `lua5.3 test/model_test.lua` | 194 / 194 (phase 9: 169): spans, REP, rate, HALT, from a row, LOOP n, nested loops, ∞, JUMP + REM, missing item, the guard (jump to itself, empty loop, loop over a missing item), `MIN_SPAN`, STOP / WAIT, a WAIT loop, default LOOP targets, insert/delete shifting targets, `Arr.shift`, rows outliving their item, validation, the store round trip |
+| `arrange_test()` + `arrange_check.py` | 16 spans, 0 failures: every pink-noise correlation 0.999–1.000; jumps end +33…+129 frames past the end (1 block, 2 out of reverse; silent) and land −1…+2 frames from the start; continuing spans change speed 1 block past the end; STOP rolls on at −0.1 dB with the pitch 88 → 36 Hz; WAIT −210 dB, the next row +1.3 ms (one block); after HALT −107 dB |
+| clicks (×, scaled to a 440 Hz sine) | jumps and fades ≤ 4.3; the speed change of a continuing span 8.3 (a slope kink); brake 0.5 |
+| prefetch | without `arr_hint`, the row after a 50 ms row began on the proxy (correlation 0.63); with it, 0.999 |
+| leaving | a seek while arranging leaves it and keeps playing at 1×; K2 stops; the arrangement survives a reload (store test + the page after `norns.script.load`) |
+| transport regression | `transport_test(field_L, {loops, edges})`: every check PASS, 0 misses, 0 xruns, `jump_gain` 0.0; scsynth 22.5–23.7 % avg (phase 6: 19.3–22.7) |
+| UI (screenshots, REPL keys) | rows, focused cell, playing bar and countdown, `ARR 002 1/4` on the arranger and tape pages; USB Down/Right/Space/Delete×2 |
+
+Fixed while building it:
+- The header's state label shook when the time's digits changed width
+  (a "1" is 2 px, other digits 4 px): the time now sits in a box as wide as
+  the same string with every digit "0", drawn left-aligned (user report).
+
+**Open after phase 10:**
+- **Hands-on on the device** (keys and a USB keyboard, by ear).
+- A short row (< ~50 ms) right after the start of an arrangement can still
+  begin on the proxy: the hint goes out when its predecessor starts.
+- Lua sends the next span when the previous switch arrives (~10 ms); a row
+  shorter than that round trip could end in the halt slot. `MIN_SPAN` (50 ms)
+  keeps it out of reach.
+
 **Open after phase 9:**
 - **A real Freesound account**: everything above ran against the mock. Check
   the real authorize page (does it show the code with the registered
@@ -1103,9 +1375,23 @@ Fixed while testing:
   the file browser.
 - No wall-clock labels on the ruler (needs a smaller font, §9.1 phase 3).
 
-### 9.1b Phase 7 (region voices + MIDI triggers): deferred (2026-11-20)
-Skipped for now; phase 8 comes first. When it is picked up, start from the
+### 9.1b Phase 7 (region voices + MIDI triggers): now phase 14 (2026-11-20)
+Moved behind the arranger, region LFOs, filetags and the ethnographer
+(§7). When it is picked up, start from the
 revised AurVoice plan and its open questions in §2.4, and §2.5 (budgets).
+
+### 9.1c Starting phase 10 (the arranger) — done, kept for the record
+- `aurotate.lua`: `PAGES` still has `'settings'` (a placeholder); rename it
+  `'arranger'` and route E1 to the column focus there (E1 does nothing outside the
+  tape page today: `enc` returns early for other pages).
+- Model: add `arr` to the document, `validate` for rows, and make deleting a
+  region/mark leave rows pointing at it (shown `?`), not crash.
+- Engine: the span swap goes next to the loop seam logic in `AurTape.sc`;
+  read the transport design notes in §9.1 first.
+- Tests: `lib/arrange.lua` cases in `test/model_test.lua` (REP, nested
+  LOOP counters, JUMP, HALT, missing items, the zero-time guard); an
+  `arrange_test()` on the device recording `test3h.wav` / `sine440.wav`
+  through an arrangement, checked like `tools/sound_check.py`.
 `rate` (§3, product) is the field still missing from `lib/sound.lua`.
 
 ### 9.2 Test assets on the shield (keep; ~2.3 GB)
@@ -1206,6 +1492,10 @@ per-voice inserts, fx rack.
   `freesound_code('GOODCODE')`. Afterwards remove `freesound.lua`,
   `dust/audio/aurotate/`, the test tapes' documents and caches, and their
   collection entries.
+- Arranger: `arrange_test()` (~30 s), then `scp`
+  `dust/audio/aurotate-spike/{arrange,arrange_ref}.wav` and
+  `dust/data/aurotate/arrange_spans.txt` and run `tools/arrange_check.py`
+  (numpy, scipy). The test's items and rows are removed afterwards.
 - Reels: `reel_test()` (~1 min), then `scp` `dust/audio/aurotate-spike/reel.wav`
   and `dust/data/aurotate/reel_events.txt` and run `tools/reel_check.py`
   (numpy, scipy). `transport_test(path, …)` takes a `.reel` path too.

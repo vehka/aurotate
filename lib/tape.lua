@@ -82,8 +82,14 @@ function Tape.playing()
   return params:get('aur_shuttle') ~= 0 and not st.jogging
 end
 
+-- a manual transport move leaves arrangement mode (lib/arranger.lua sets
+-- these); Tape.arr_label() is the header state while arranging
+Tape.on_manual = function() end
+Tape.arr_label = function() return nil end
+
 -- leaves jog mode (the engine glides from the jog speed)
 local function shuttle_action(r)
+  Tape.on_manual()
   local m = Tape.max_speed()
   if math.abs(r) > m then
     params:set('aur_shuttle', util.clamp(r, -m, m))
@@ -138,6 +144,7 @@ end
 
 -- E2: one slow tick moves the tape by `nudge` ms; fast turning pushes harder
 function Tape.jog_turn(d)
+  Tape.on_manual()
   local t = util.time()
   if not st.jogging then
     st.jogging = true
@@ -158,6 +165,7 @@ function Tape.jog_turn(d)
 end
 
 function Tape.jump(sec)
+  Tape.on_manual()
   sec = util.clamp(sec, 0, math.max(0, st.dur))
   -- the engine takes the new position at once; set it here too, so a second
   -- seek before the next poll starts from it (not from the old position)
@@ -269,6 +277,7 @@ function Tape.open(path, start)
   st.jogging = false
   st.peaks = nil
   st.proxies = 0
+  Tape.on_manual() -- a new tape: no arrangement playing
   params:set('aur_shuttle', 0, true)
   if parts then
     engine.reel_clear(#parts)
@@ -337,6 +346,7 @@ function Tape.add_params()
   params:add_binary('aur_loop', 'loop', 'toggle', 0)
   params:set_action('aur_loop', function(v)
     if v == 1 then
+      Tape.on_manual()
       local a, b = params:get('aur_loop_in'), params:get('aur_loop_out')
       if a > b then a, b = b, a end
       -- a loop is entered by crossing its edge; start inside it

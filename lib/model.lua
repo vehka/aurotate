@@ -9,6 +9,7 @@
 --   origin = { date, secs, source }: where the recording starts, for the
 --            wall clock (lib/wallclock.lua)
 --   source = where a downloaded tape came from, who to credit (lib/source.lua)
+--   arr    = { rows = { row... } }? the arrangement (lib/arrange.lua)
 --
 -- Pure data, no norns calls, so it can be tested off the device. Lists stay
 -- sorted by time (marks by t, regions by t0). Every change goes through a
@@ -18,6 +19,7 @@
 local Sound = include 'lib/sound'
 local Wall = include 'lib/wallclock'
 local Source = include 'lib/source'
+local Arr = include 'lib/arrange'
 
 local Model = {}
 
@@ -284,6 +286,43 @@ function Model.set_source(doc, field, value)
   Model.changed(doc)
 end
 
+---- the arrangement (lib/arrange.lua); rows point at item ids, so a deleted
+---- item leaves its rows in place (shown `?`, skipped when playing)
+
+function Model.arr_rows(doc)
+  doc.arr = doc.arr or { rows = {} }
+  return doc.arr.rows
+end
+
+-- insert `row` at index i; false when the list is full
+function Model.arr_insert(doc, i, row)
+  if not Arr.insert(Model.arr_rows(doc), i, row) then return false end
+  Model.changed(doc)
+  return true
+end
+
+function Model.arr_delete(doc, i)
+  if not Arr.delete(Model.arr_rows(doc), i) then return false end
+  Model.changed(doc)
+  return true
+end
+
+-- replace row i (a different kind, another item)
+function Model.arr_replace(doc, i, row)
+  local rows = Model.arr_rows(doc)
+  if not rows[i] then return end
+  rows[i] = row
+  Model.changed(doc)
+end
+
+-- one field of row i (rep, rate, to, n, text)
+function Model.arr_set(doc, i, field, v)
+  local row = Model.arr_rows(doc)[i]
+  if not row or row[field] == v then return end
+  row[field] = v
+  Model.changed(doc)
+end
+
 ---- loading: validation and migrations
 
 -- migrations[v] turns a version v document into version v + 1
@@ -369,6 +408,9 @@ function Model.validate(t)
   end
   resort(doc.marks, 't')
   resort(doc.regions, 't0')
+  local arr, arr_dropped = Arr.clean(t.arr)
+  doc.arr = arr
+  dropped = dropped + arr_dropped
   doc.next_id = math.max(num(t.next_id) and math.floor(t.next_id) or 1, max_id + 1)
   return doc, nil, dropped
 end

@@ -112,6 +112,8 @@ local function state_label(Tape, st)
     return 'MISS', 15
   end
   if st.jogging then return 'SCRUB', 15 end
+  local arr = Tape.arr_label()
+  if arr then return arr, 15 end
   if Tape.focusing() then return 'FOCUS', 15 end
   local r = params:get('aur_shuttle')
   if r == 0 then return 'STOP', 6 end

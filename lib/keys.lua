@@ -16,6 +16,10 @@
 -- Enter opens the tape, Esc plays / stops (Keys.collection, set by the
 -- script: move(d), open(), busy()).
 --
+-- On the arranger page (Keys.arranger): Up/Down row, Left/Right column,
+-- Shift+Down insert, Shift+Up or Delete delete (twice), Enter edits a REM
+-- (else cues the item), Space play / stop; the transport hotkeys work too.
+--
 -- F1–F5 belong to the system menu (core/keyboard.lua takes them before the
 -- script sees them), hence F6–F9 rather than the usual F1–F4.
 
@@ -42,6 +46,7 @@ local MOVES = { LEFT = 'left', RIGHT = 'right', UP = 'up', DOWN = 'down', HOME =
 local LIST_MOVES = { UP = -1, DOWN = 1, PAGEUP = -7, PAGEDOWN = 7, HOME = -math.huge, END = math.huge }
 
 Keys.collection = nil
+Keys.arranger = nil -- lib/ui/arranger
 
 function Keys.code(c, v)
   local pg = page()
@@ -53,6 +58,29 @@ function Keys.code(c, v)
     elseif v == 1 and c == 'ESC' and Tape.st.path then
       Tape.toggle()
     end
+    return
+  end
+  if pg == 'arranger' and Keys.arranger and v > 0 and not Keys.arranger.modal and Tape.st.path then
+    local U, press = Keys.arranger, v == 1
+    local shift = keyboard.shift()
+    if c == 'DOWN' and shift then
+      if press then U.insert() end
+    elseif (c == 'UP' and shift) or c == 'DELETE' then
+      if press then U.delete() end
+    elseif LIST_MOVES[c] then
+      U.move(math.max(-1000, math.min(1000, LIST_MOVES[c])))
+    elseif c == 'LEFT' or c == 'RIGHT' then
+      U.col_turn(c == 'LEFT' and -1 or 1)
+    elseif press and (c == 'ENTER' or c == 'KPENTER') then
+      U.k3()
+    elseif press and c == 'SPACE' then
+      U.play()
+    elseif press and c == 'ESC' then
+      Tape.toggle_rewind(params:get('aur_rewind'))
+    elseif c == 'F6' or c == 'F7' then
+      Tape.jump(Tape.st.pos + (c == 'F6' and -SKIP or SKIP))
+    end
+    Tape.dirty = true
     return
   end
   if v == 0 or (pg ~= 'tape' and pg ~= 'regions') or Popup.modal or not Tape.st.path then return end

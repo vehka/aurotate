@@ -16,10 +16,14 @@ function Draw.header(page, pages, name, state, state_level, time, name_level, na
   screen.font_size(8)
   local x = 127
   if time then
+    -- a fixed box: digits differ in width ("1" is narrow), so measure as if
+    -- every digit were "0" and draw left-aligned in it; neither the time's
+    -- digits nor the state beside it move as it counts
+    local w = screen.text_extents((time:gsub('%d', '0')))
     screen.level(15)
-    screen.move(x, 8)
-    screen.text_right(time)
-    x = x - screen.text_extents(time) - 6
+    screen.move(x - w, 8)
+    screen.text(time)
+    x = x - w - 6
   end
   if state then
     screen.level(state_level or 15)

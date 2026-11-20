@@ -49,7 +49,10 @@ AurTape {
 	var <amp = 1, <jogStop = 0.5, <fade = 0.008, parked = false, nudgeTotal = 0;
 	var <lifter = 0.5, <focus = 0.15, <proxyShare = 0;
 	var <proxies, proxyReqs, pinflight;
-	var posFunc, okFunc, doneFunc, failFunc, jgFunc;
+	var posFunc, okFunc, doneFunc, failFunc, jgFunc, arrFunc;
+	// arrangement: the two span slots (prArrSlot), which one plays, the
+	// generation Lua gave; arrPoll (a non-periodic poll) gets each switch
+	var <arrOn = false, arrSlots, arrParity = 0, arrGen = 0, <>arrPoll, arrHint;
 	var <st, jumpTime, phaseName = "start", phaseStart;
 	var <posBus; // control: [position s, jump/wrap trigger], for the output stage
 	var <>reportPath;
@@ -65,32 +68,64 @@ AurTape {
 			jog = 0, nudgeSum = 0, t_jogZero = 0, jogStop = 0.5,
 			loopOn = 0, loopStart = 0, loopEnd = 1, loopStartRing = 0, loopBackFile = 0, loopBackRing = 0,
 			p1buf = 0, p2buf = 0, hasP1 = 0, hasP2 = 0, p1Ratio = 0.125, p2Ratio = 0.015625,
-			p1Nyq = 2700, p2Nyq = 337, lifter = 0.5, focus = 0.15, maxRate = 64, posOut = 0|
-			// previous blocks: [kpos(n-1), kpos(n-2), jumped(n-1)]
-			var fb = LocalIn.kr(3);
-			var lp = fb[0], lpp = fb[1], jumpedPrev = fb[2];
+			p1Nyq = 2700, p2Nyq = 337, lifter = 0.5, focus = 0.15, maxRate = 64, posOut = 0,
+			arrOn = 0, t_arrReset = 0, arrGen = 0,
+			arrA = #[0, 0, 0, 0, 0, 0, 0, 0], arrB = #[0, 0, 0, 0, 0, 0, 0, 0]|
+			// previous blocks: [kpos(n-1), kpos(n-2), jumped(n-1), arrangement spans
+			// begun, time in the current span]
+			var fb = LocalIn.kr(5);
+			var lp = fb[0], lpp = fb[1], jumpedPrev = fb[2], countPrev = fb[3], elPrev = fb[4];
 			// jog: an integrator with friction; t_jogZero resets it to the nudge.
 			// nudges arrive as a running total, so several in one block add up
 			var nudge = nudgeSum - Delay1.kr(nudgeSum);
 			var jogRate = Integrator.kr(nudge, exp(ControlDur.ir.neg / jogStop) * (1 - t_jogZero)).clip(-64, 64);
 			var sp, up, u1, u2, wFull, f, gap, w1, w2, p1, p2, full, prox, inFile, mix, cue, cueAmt, contact, drive;
-			// lag time 0 while jogging, so leaving jog glides from the jog rate
-			var ru = Lag.kr(Select.kr(jog, [rate, jogRate]), rateLag * (1 - jog)).clip(maxRate.neg, maxRate);
-			var r = ru * rateScale;
-			var speed = r.abs * SampleRate.ir; // file frames per second
 			// user jump: fade out, hold silence, fade in; the jump lands in the
 			// middle of the hold
 			var hold = ControlDur.ir * 4;
 			var jumpGain = EnvGen.kr(Env([1, 0, 0, 1], [fade, hold, fade]), t_jump);
 			var userJump = TDelay.kr(t_jump, fade + (hold * 0.5));
-			// loop wrap when the previous block crossed an edge in the direction of travel
 			var notJumped = 1 - jumpedPrev;
-			var fwdWrap = loopOn * (r > 0) * (lpp < loopEnd) * (lp >= loopEnd) * notJumped;
-			var revWrap = loopOn * (r < 0) * (lpp >= loopStart) * (lp < loopStart) * notJumped;
-			var trig = (userJump + fwdWrap + revWrap) > 0;
+			// arrangement (lib/arrange.lua): two span slots [a, b, rate, start
+			// frame, start in the ring, continues the previous, duration, ramp],
+			// played in turn. `cur` is the span playing, `nxt` the one after it;
+			// crossing cur's end in its direction switches to nxt in the same
+			// block. A timed slot (duration > 0: STOP, WAIT) ends by time instead;
+			// with ramp its speed falls from `rate` to 0 over the duration (the
+			// brake). Not armed until the jump that starts an arrangement has landed
+			var armed = 1 - Trig1.kr(t_jump, (fade * 2) + hold + ControlDur.ir);
+			var parPrev = countPrev % 2;
+			var cur = Select.kr(parPrev, [arrA, arrB]);
+			var nxt = Select.kr(1 - parPrev, [arrA, arrB]);
+			var arrFwd = arrOn * armed * (cur[2] > 0) * (lpp < cur[1]) * (lp >= cur[1]) * notJumped;
+			var arrRev = arrOn * armed * (cur[2] < 0) * (lpp >= cur[0]) * (lp < cur[0]) * notJumped;
+			// (switch in the block that starts at the span's time: elPrev is the
+			// time at the start of the previous block)
+			var arrTime = arrOn * (cur[6] > 0) * ((elPrev + ControlDur.ir) >= (cur[6] - (ControlDur.ir * 0.5)));
+			var arrWrap = (arrFwd + arrRev + arrTime) > 0;
+			// a continuing span (starts where cur ends, same direction) needs no jump
+			var arrReset = arrWrap * (1 - nxt[5]);
+			var count = Select.kr(t_arrReset > 0, [countPrev + arrWrap, 0]);
+			var el = Select.kr((arrWrap + t_arrReset) > 0, [elPrev + ControlDur.ir, 0]);
+			var ramped = { |sl| sl[2] * Select.kr(sl[7] > 0, [1, (1 - (el / sl[6].max(0.001))).max(0)]) };
+			var arrRate = Select.kr(count % 2, [ramped.(arrA), ramped.(arrB)]);
+			// lag time 0 while jogging or arranging, so leaving either glides from
+			// the speed it had
+			var ru = Lag.kr(Select.kr(jog, [Select.kr(arrOn, [rate, arrRate]), jogRate]),
+				rateLag * (1 - jog) * (1 - arrOn)).clip(maxRate.neg, maxRate);
+			var r = ru * rateScale;
+			var speed = r.abs * SampleRate.ir; // file frames per second
+			// loop wrap when the previous block crossed an edge in the direction
+			// of travel (no loops while arranging)
+			var loopOk = loopOn * (1 - arrOn);
+			var fwdWrap = loopOk * (r > 0) * (lpp < loopEnd) * (lp >= loopEnd) * notJumped;
+			var revWrap = loopOk * (r < 0) * (lpp >= loopStart) * (lp < loopStart) * notJumped;
+			var trig = (userJump + fwdWrap + revWrap + arrReset) > 0;
 			var isUser = userJump > 0;
-			var resetFile = Select.kr(isUser, [Select.kr(fwdWrap, [loopBackFile, loopStart]), jumpFile]);
-			var resetRing = Select.kr(isUser, [Select.kr(fwdWrap, [loopBackRing, loopStartRing]), jumpRing]);
+			var resetFile = Select.kr(isUser, [
+				Select.kr(arrReset, [Select.kr(fwdWrap, [loopBackFile, loopStart]), nxt[3]]), jumpFile]);
+			var resetRing = Select.kr(isUser, [
+				Select.kr(arrReset, [Select.kr(fwdWrap, [loopBackRing, loopStartRing]), nxt[4]]), jumpRing]);
 			var sig = PlayBuf.ar(2, ring, r, trig, resetRing, loop: 1);
 			// proxies follow the file position (not the ring), reset by the same triggers
 			var p1raw = PlayBuf.ar(1, p1buf, r * p1Ratio, trig, resetFile * p1Ratio, loop: 1);
@@ -104,14 +139,26 @@ AurTape {
 			var dEnd = loopEnd - kpos, dStart = kpos - loopStart;
 			var gEnd = 1 - (loopOn * (r > 0) * (dEnd < fadeF) * (dEnd > over.neg) * (1 - (dEnd / fadeF).clip(0, 1)));
 			var gStart = 1 - (loopOn * (r < 0) * (dStart < fadeF) * (dStart > over.neg) * (1 - (dStart / fadeF).clip(0, 1)));
-			// fade in after a loop wrap (Sweep restarts from 0 on every trigger)
-			var wrapUp = Sweep.kr((fwdWrap + revWrap) > 0, 1 / fade).min(1);
-			var gain = gEnd * gStart * jumpGain * wrapUp;
+			// the same before an arrangement span's end, unless the next continues it
+			var aFade = arrOn * (1 - nxt[5]);
+			var aEnd = cur[1] - kpos, aStart = kpos - cur[0];
+			var gArrEnd = 1 - (aFade * (cur[2] > 0) * (aEnd < fadeF) * (aEnd > over.neg) * (1 - (aEnd / fadeF).clip(0, 1)));
+			var gArrStart = 1 - (aFade * (cur[2] < 0) * (aStart < fadeF) * (aStart > over.neg) * (1 - (aStart / fadeF).clip(0, 1)));
+			// a timed span (a brake) fades out before its end when a jump follows
+			var gArrTime = 1 - (aFade * (cur[6] > 0) * (1 - ((cur[6] - elPrev) / fade).clip(0, 1)));
+			// a halted arrangement (a span of rate 0) is silent
+			var halted = Lag.kr(arrOn * (arrRate.abs < 1e-6), 0.01);
+			// a tape standing still would hold its last sample as DC: fade it
+			// out (and back in when it moves)
+			var moving = Lag.kr(ru.abs > 1e-4, 0.02);
+			// fade in after a loop wrap or a span jump (Sweep restarts from 0 on every trigger)
+			var wrapUp = Sweep.kr((fwdWrap + revWrap + arrReset) > 0, 1 / fade).min(1);
+			var gain = gEnd * gStart * gArrEnd * gArrStart * gArrTime * (1 - halted) * moving * jumpGain * wrapUp;
 			var chunk = (kpos / chunkFrames).floor;
 			var held = BufRd.kr(1, valid, chunk % slots, 0, 1);
 			// (`==` on UGens is object identity in sclang, hence the explicit op)
 			var okk = (held >= 0) * BinaryOpUGen('==', held, chunk) * (kpos >= 0) * (kpos < fileFrames);
-			LocalOut.kr([kpos, lp, trig]);
+			LocalOut.kr([kpos, lp, trig, count, el]);
 			// which source plays: by speed, a proxy takes over over one octave
 			// around its decimation factor (|rate| >= decimation)
 			sp = ru.abs;
@@ -141,6 +188,8 @@ AurTape {
 			mix = XFade2.ar(mix, cue, cueAmt * 2 - 1);
 			SendReply.kr(Impulse.kr(25), '/aur/pos', [kpos, ru, w1 + w2], id);
 			SendReply.kr(Changed.kr(okk), '/aur/ok', [okk, kpos, ru], id);
+			// a span ended: [spans begun, generation, the position at the switch]
+			SendReply.kr(arrWrap, '/aur/arr', [count, arrGen, lp], id);
 			// gain when a jump or wrap lands (the previous block's, which K2A
 			// starts the jump block from): should be 0 (jump_gain in the report)
 			SendReply.kr(trig, '/aur/jg', [Delay1.kr(gain)], id);
@@ -169,6 +218,7 @@ AurTape {
 		jgFunc = OSCFunc({ |msg|
 			if(this.prMine(msg)) { st.jumpGain = max(st.jumpGain, msg[3]) }
 		}, '/aur/jg');
+		arrFunc = OSCFunc({ |msg| if(this.prMine(msg)) { this.prArrWrapped(msg[3].asInteger, msg[4].asInteger) } }, '/aur/arr');
 		proxies = [nil, nil];
 		proxyReqs = [nil, nil];
 		doneFunc = OSCFunc({ |msg|
@@ -220,7 +270,7 @@ AurTape {
 	// loading are queued (last wins)
 	open { |argPath, startSecs = 0, partPaths|
 		// a new tape starts stopped; rate commands sent while it loads still count
-		targetRate = 0; jogging = false;
+		targetRate = 0; jogging = false; arrOn = false;
 		this.prOpen(argPath, startSecs, partPaths);
 	}
 
@@ -309,6 +359,7 @@ AurTape {
 	maxRate { ^if(this.hasProxy(1)) { 256 } { 64 } }
 
 	setRate { |r, lag = 0.1|
+		this.arrOff;
 		targetRate = r.clip(this.maxRate.neg, this.maxRate);
 		parked = false;
 		if(jogging) {
@@ -328,6 +379,7 @@ AurTape {
 	// push the tape. The first push enters jog mode: the tape keeps its
 	// current speed
 	nudge { |dv|
+		this.arrOff;
 		parked = false;
 		if(jogging.not) {
 			jogging = true;
@@ -365,7 +417,7 @@ AurTape {
 			\loopStartRing, loopStart % rf, \loopBackFile, back, \loopBackRing, back % rf]
 	}
 
-	jumpSecs { |s| this.jump(s * fileRate) }
+	jumpSecs { |s| this.arrOff; this.jump(s * fileRate) }
 
 	jump { |frame|
 		if(synth.isNil) { ^this };
@@ -387,6 +439,120 @@ AurTape {
 		};
 		synth.set(\jumpFile, frame, \jumpRing, frame % ringFrames, \t_jump, 1);
 		this.service;
+	}
+
+	//// arrangement (lib/arrange.lua; docs/PLAN.md §4.4)
+
+	// a span slot for the synth: [a, b, rate, start frame, start in the ring,
+	// continues `prev`]. Times in seconds; frames are multiples of `quant`
+	prArrSlot { |a, b, rate, prev, kind = 0, dur = 0|
+		var top = this.q(numFrames) - quant;
+		var fa = this.q(a * fileRate).clip(0, top - (quant * 4));
+		var fb = this.q(b * fileRate).clip(fa + (quant * 4), top);
+		var start, cont;
+		if(kind > 0) { ^this.prArrTimed(kind, dur, prev) };
+		rate = rate.clip(this.maxRate.neg, this.maxRate);
+		start = if(rate > 0) { fa } { fb - quant };
+		cont = prev.notNil and: { prev[2] != 0 } and: { prev[2].sign == rate.sign } and: {
+			if(rate > 0) { fa == prev[1] } { fb == prev[0] } };
+		^[fa, fb, rate, start, start % ringFrames, cont.binaryValue, 0, 0]
+	}
+
+	// kind 1: STOP (brake from the speed `prev` ends with), 2: WAIT. No
+	// position ends (they continue where the tape is), `dur` s long
+	prArrTimed { |kind, dur, prev|
+		var r = 0;
+		if(kind == 1) {
+			r = if(prev.isNil) { if(jogging) { actualRate } { targetRate } } {
+				if(prev[7] > 0) { 0 } { prev[2] } }
+		};
+		^[-1e9, 1e10, r, 0, 0, 1, dur.max(0.01), (kind == 1).binaryValue]
+	}
+
+	// where a span stops when nothing follows: its end, at rate 0 (after a
+	// timed span: where the tape is)
+	prArrHalt { |slot|
+		var p = if(slot[2] > 0) { slot[1] } { slot[0] };
+		if(slot[6] > 0) { ^[-1e9, 1e10, 0, 0, 0, 1, 0, 0] };
+		^[p, p, 0, p, p % ringFrames, 0, 0, 0]
+	}
+
+	prArrSet { |i, slot|
+		arrSlots[i] = slot;
+		synth !? { synth.set(if(i == 0) { \arrA } { \arrB }, slot) };
+	}
+
+	// play a span now (a jump to its start); what follows comes with arrNext
+	arrSpan { |a, b, rate, gen, kind = 0, dur = 0|
+		var slot;
+		if(synth.isNil or: { numFrames <= 0 }) { ^this };
+		slot = this.prArrSlot(a, b, rate, nil, kind, dur);
+		arrOn = true; arrParity = 0; arrGen = gen; arrHint = nil;
+		arrSlots = [slot, this.prArrHalt(slot)];
+		jogging = false; parked = false;
+		targetRate = slot[2];
+		synth.set(\arrA, arrSlots[0], \arrB, arrSlots[1], \arrOn, 1, \t_arrReset, 1, \arrGen, gen, \jog, 0);
+		// a timed span starts where the tape is
+		if(kind == 0) { this.jump(slot[3]) } { this.service };
+	}
+
+	// the span after the one playing
+	arrNext { |a, b, rate, kind = 0, dur = 0|
+		if(arrOn.not) { ^this };
+		this.prArrSet(1 - arrParity, this.prArrSlot(a, b, rate, arrSlots[arrParity], kind, dur));
+		this.service;
+	}
+
+	// the span after the next: only prefetched (a short next span would
+	// otherwise leave too little time to read it)
+	arrHintSpan { |a, b, rate|
+		if(arrOn.not) { ^this };
+		arrHint = this.prArrSlot(a, b, rate, nil);
+		this.service;
+	}
+
+	// leave arrangement mode: the tape keeps its place and speed
+	arrOff {
+		if(arrOn.not) { ^this };
+		arrOn = false;
+		synth !? { synth.set(\arrOn, 0, \rate, targetRate, \rateLag, 0) };
+	}
+
+	// the synth switched spans: until Lua sends the next, the one after the
+	// new span is a stop at its end
+	prArrWrapped { |count, gen|
+		if(arrOn.not or: { gen != arrGen }) { ^this };
+		arrParity = count % 2;
+		// (a brake ends at 0: the speed to come back to after it)
+		targetRate = if(arrSlots[arrParity][7] > 0) { 0 } { arrSlots[arrParity][2] };
+		this.prArrSet(1 - arrParity, this.prArrHalt(arrSlots[arrParity]));
+		arrPoll !? { arrPoll.update((gen * 10000) + (count % 10000)) };
+		this.service;
+	}
+
+	// chunks to keep for an arrangement: the rest of the span playing, then
+	// the next span from its start (or straight on when it continues)
+	prArrOrder { |c, ahead|
+		var cur = arrSlots[arrParity], nxt = arrSlots[1 - arrParity];
+		var order = List[c], w = c, dir, endC, nd, nEnd;
+		var chunkOf = { |f| (f / chunkFrames).floor.asInteger };
+		dir = if(cur[2] < 0) { -1 } { 1 };
+		endC = chunkOf.(if(dir > 0) { cur[1] - 1 } { cur[0] });
+		while { order.size <= ahead and: { ((endC - w) * dir) > 0 } } { w = w + dir; order.add(w) };
+		if(nxt[2] != 0 and: { nxt[6] <= 0 }) {
+			nd = if(nxt[2] < 0) { -1 } { 1 };
+			nEnd = chunkOf.(if(nd > 0) { nxt[1] - 1 } { nxt[0] });
+			w = if(nxt[5] > 0) { w } { chunkOf.(nxt[3]) };
+			if(nxt[5] == 0) { order.add(w) };
+			while { order.size <= ahead and: { ((nEnd - w) * nd) > 0 } } { w = w + nd; order.add(w) };
+		};
+		// the span after: its first two chunks
+		if(arrHint.notNil) {
+			w = chunkOf.(arrHint[3]);
+			order.add(w);
+			order.add(w + if(arrHint[2] < 0) { -1 } { 1 });
+		};
+		^order
 	}
 
 	prResident { |frame|
@@ -429,9 +595,11 @@ AurTape {
 		ls = (loopStart / chunkFrames).floor.asInteger;
 		le = ((loopEnd - 1).max(0) / chunkFrames).floor.asInteger;
 		inLoop = loopOn and: { pos >= loopStart } and: { pos < loopEnd };
-		order = List[c];
-		w = c;
-		ahead.do { w = this.prNext(w, dir, inLoop, ls, le); order.add(w) };
+		if(arrOn) { order = this.prArrOrder(c, ahead) } {
+			order = List[c];
+			w = c;
+			ahead.do { w = this.prNext(w, dir, inLoop, ls, le); order.add(w) };
+		};
 		w = c;
 		behind.do { w = this.prNext(w, dir.neg, inLoop, ls, le); order.add(w) };
 		claimed = Array.newClear(slots);
@@ -556,7 +724,7 @@ AurTape {
 	// stop and park at the ends of the file
 	prEdges {
 		var moving = if(jogging) { actualRate } { targetRate };
-		if(parked.not) {
+		if(parked.not and: { arrOn.not }) {
 			if(pos >= (numFrames - quant) and: { moving > 0 }) { this.prPark(numFrames - quant) };
 			if(pos <= 0 and: { moving < 0 }) { this.prPark(0) };
 		}
@@ -680,7 +848,7 @@ AurTape {
 	}
 
 	free {
-		[posFunc, okFunc, doneFunc, failFunc, jgFunc].do { |f| f !? { f.free } };
+		[posFunc, okFunc, doneFunc, failFunc, jgFunc, arrFunc].do { |f| f !? { f.free } };
 		this.prFreeServer;
 		proxies.do { |p| p !? { p.buf.free } };
 		proxies = [nil, nil];

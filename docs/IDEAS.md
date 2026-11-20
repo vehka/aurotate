@@ -41,3 +41,9 @@
 	* Zotero export?
 * with grid
 	* performance mode? unnecessary?
+
+# tags
+
+* filetag support (https://github.com/novoid/filetags) --> aurotate tags when adding files
+
+

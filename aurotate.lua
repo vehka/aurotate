@@ -2,8 +2,7 @@
 -- an audio-anthropology workbench:
 -- hours-long recordings on tape
 --
--- phase 9: downloads by URL
--- and from Freesound
+-- phase 10: the arranger
 --
 -- E1 zoom
 -- K1+E1 page
@@ -36,6 +35,15 @@
 -- URL, Freesound id, queue file
 -- downloads.txt, Freesound login)
 --
+-- arranger page (K1+E1 right):
+-- E1 column, E2 row, E3 value
+-- (ITEM left of the first item:
+-- WAIT, STOP (brake), REM,
+-- LOOP, HALT, JUMP)
+-- K2 play from the row / stop
+-- K3 cue the item / edit a REM
+-- K1+K3 insert, K1+K2 delete
+--
 -- tape: K3 or PARAMS > TAPE
 
 engine.name = 'Aurotate'
@@ -54,6 +62,8 @@ local Coll = include 'lib/ui/collection'
 local TapePopup = include 'lib/ui/tape_popup'
 local Download = include 'lib/download'
 local AddPopup = include 'lib/ui/add_popup'
+local Run = include 'lib/arranger'
+local ArrPage = include 'lib/ui/arranger'
 
 local st = Tape.st
 local shift = false
@@ -67,19 +77,10 @@ local FPS = 15
 local redraw_metro
 local stats = { n = 0, sum = 0, max = 0 } -- redraw time, for dbg_status()
 
----- pages (K1+E1); settings doesn't exist yet
+---- pages (K1+E1); settings live in PARAMS
 
-local PAGES = { 'collection', 'tape', 'regions', 'settings' }
+local PAGES = { 'collection', 'tape', 'regions', 'arranger' }
 local page = 2
-
-local function placeholder(title, phase)
-  screen.clear()
-  Draw.header(page, #PAGES, title:upper(), nil, nil, nil)
-  screen.level(4)
-  screen.move(64, 36)
-  screen.text_center(phase and ('(phase ' .. phase .. ')') or '(not yet)')
-  screen.update()
-end
 
 local function choose_tape()
   selecting = true
@@ -99,6 +100,7 @@ local function goto_page(name)
   AddPopup.reset()
   if PAGES[page] == 'regions' then Regions.enter() end
   if PAGES[page] == 'collection' then Coll.enter() end
+  if PAGES[page] == 'arranger' then ArrPage.enter() end
   Tape.dirty = true
 end
 
@@ -132,8 +134,11 @@ function init()
   Popup.init(Tape, Annot)
   Regions.init(Tape, Annot, View)
   RS.init(Tape, Annot)
+  Run.init(Tape, Annot, View)
+  ArrPage.init(Tape, Annot, View, Run)
   Popup.sound(RS)
   Keys.init(Tape, Annot, Popup, Regions, function() return not selecting and PAGES[page] or nil end)
+  Keys.arranger = ArrPage
   Tape.on_open = function(path, dur)
     Popup.reset()
     return Annot.switch(path, dur)
@@ -170,12 +175,15 @@ function init()
   if last and util.file_exists(last) then params:set('aur_file', last, true) end
   Tape.open(params:get('aur_file'))
   Tape.start_polls()
+  Run.start_poll()
   RS.push(true)
   redraw_metro = metro.init(function()
     Annot.tick()
     RS.tick()
     if Download.tick() then Tape.dirty = true end
-    if selecting or Popup.modal or TapePopup.modal or AddPopup.modal or Download.installing then return end
+    if selecting or Popup.modal or TapePopup.modal or AddPopup.modal or ArrPage.modal or Download.installing then
+      return
+    end
     if View.tick() then Tape.dirty = true end
     if Popup.tick() then Tape.dirty = true end
     if Tape.dirty then
@@ -207,6 +215,15 @@ function key(n, z)
         local r = Coll.open()
         if r == 'add' then AddPopup.open() elseif r then goto_page('tape') end
       end
+    end
+    Tape.dirty = true
+    return
+  end
+  if PAGES[page] == 'arranger' then
+    if z == 1 and n == 2 then
+      if shift then ArrPage.delete() else ArrPage.play() end
+    elseif z == 1 and n == 3 then
+      if shift then ArrPage.insert() else ArrPage.k3() end
     end
     Tape.dirty = true
     return
@@ -252,8 +269,19 @@ function enc(n, d)
       AddPopup.close()
       if PAGES[page] == 'regions' then Regions.enter() end
       if PAGES[page] == 'collection' then Coll.enter() end
+      if PAGES[page] == 'arranger' then ArrPage.enter() end
     end
     Tape.dirty = true
+    return
+  end
+  if PAGES[page] == 'arranger' then
+    if n == 1 then
+      ArrPage.col_turn(d)
+    elseif n == 2 then
+      ArrPage.move(d)
+    else
+      ArrPage.value_turn(d)
+    end
     return
   end
   if PAGES[page] == 'collection' then
@@ -315,7 +343,8 @@ function redraw()
     Popup.redraw()
     screen.update()
   else
-    placeholder('settings')
+    ArrPage.redraw(page, #PAGES)
+    screen.update()
   end
   t = util.time() - t
   stats.n, stats.sum, stats.max = stats.n + 1, stats.sum + t, math.max(stats.max, t)
@@ -339,6 +368,13 @@ function dbg_status()
   local cur = RS.current()
   print(string.format('SOUND on %d segments %d FX %d HERE %s',
     params:get('aur_snd'), #RS.segments(), st.fx, cur and cur.id or '-'))
+  local p = Run.playing
+  print(string.format('ARR on %s rows %d playing %s queued %s',
+    tostring(Run.on), doc and doc.arr and #doc.arr.rows or 0,
+    p and (p.kind and (p.kind .. ' ' .. p.secs)
+      or string.format('%s %.3f-%.3f x%g %d/%d', tostring(p.row), p.a, p.b, p.rate, p.pass, p.rep)) or '-',
+    Run.queued and (Run.queued.kind or string.format('%.3f-%.3f x%g', Run.queued.a, Run.queued.b,
+      Run.queued.rate)) or '-'))
 end
 
 -- automated transport run; see test/transport.lua
@@ -367,6 +403,12 @@ end
 -- (test/reel.lua); check with tools/reel_check.py
 function reel_test(path, bounds)
   return include('test/reel').run(Tape, path, bounds)
+end
+
+-- arranger: records test3h through an arrangement (test/arrange.lua);
+-- check with tools/arrange_check.py
+function arrange_test(path)
+  return include('test/arrange').run(Tape, Annot, Run, path)
 end
 
 function clicks_test(path)
@@ -399,7 +441,8 @@ end
 -- REPL handles: dbg.Tape, dbg.View; dbg_shot(name) redraws and saves the
 -- screen to dust/data/aurotate/<name>.png
 dbg = { Tape = Tape, View = View, Annot = Annot, Popup = Popup, Keys = Keys, Regions = Regions, RS = RS,
-  Shelf = Shelf, Coll = Coll, TapePopup = TapePopup, Download = Download, AddPopup = AddPopup }
+  Shelf = Shelf, Coll = Coll, TapePopup = TapePopup, Download = Download, AddPopup = AddPopup,
+  Run = Run, ArrPage = ArrPage }
 -- REPL: dbg_page('regions') shows a page
 function dbg_page(name)
   goto_page(name)
@@ -416,6 +459,7 @@ end
 
 function cleanup()
   if redraw_metro then redraw_metro:stop() end
+  Run.cleanup()
   Download.cleanup()
   Annot.cleanup()
   Tape.cleanup()

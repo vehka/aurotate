@@ -24,10 +24,20 @@
 //                  gain (dB, -60 = off), pan (-1..1), tone (-1..1)
 //   snd_commit i   use the list (only if i segments arrived since snd_clear)
 //   snd_glide f    glide time for region sound changes (s)
+//   arr_span fffiif  arrangement (phase 10): play a, b (s) at rate now (a jump
+//                  to its start; negative rates play b -> a), generation,
+//                  kind (0 span, 1 STOP: brake over dur s, 2 WAIT: dur s of
+//                  silence; both where the tape is, a b rate unused), dur
+//   arr_next fffif the span after the one playing (none: stop at its end):
+//                  a, b, rate, kind, dur
+//   arr_hint fff   the span after that (prefetched only)
+//   arr_off        leave arrangement mode; the tape keeps its place and speed
+//                  (rate, jog_nudge and jump leave it too)
 // polls: aur_pos, aur_rate, aur_ok (chunk under the playhead loaded), aur_misses,
 //   aur_dur, aur_proxies (bit 1: P1 loaded, bit 2: P2), aur_proxy_share (0..1,
 //   how much of the sound comes from the proxies), aur_fx (bit 1: fx send a
-//   found, bit 2: send b)
+//   found, bit 2: send b), aur_arr (not periodic: sent when a span ends,
+//   generation * 10000 + spans begun since arr_span)
 //
 // node order in context.xg: one group per voice, the tape at its head writing
 // to the voice bus, the output stage (AurOut) at its tail
@@ -84,6 +94,10 @@ Engine_Aurotate : CroneEngine {
 			}
 		});
 		this.addCommand(\snd_glide, "f", { |msg| out.setGlide(msg[1]) });
+		this.addCommand(\arr_span, "fffiif", { |msg| tape.arrSpan(msg[1], msg[2], msg[3], msg[4], msg[5], msg[6]) });
+		this.addCommand(\arr_next, "fffif", { |msg| tape.arrNext(msg[1], msg[2], msg[3], msg[4], msg[5]) });
+		this.addCommand(\arr_hint, "fff", { |msg| tape.arrHintSpan(msg[1], msg[2], msg[3]) });
+		this.addCommand(\arr_off, "", { tape.arrOff });
 
 		this.addPoll(\aur_pos, { tape.posSecs });
 		this.addPoll(\aur_rate, { tape.actualRate });
@@ -93,6 +107,7 @@ Engine_Aurotate : CroneEngine {
 		this.addPoll(\aur_proxies, { tape.hasProxy(0).binaryValue + (2 * tape.hasProxy(1).binaryValue) });
 		this.addPoll(\aur_proxy_share, { tape.proxyShare });
 		this.addPoll(\aur_fx, { out.fxState });
+		tape.arrPoll = this.addPoll(\aur_arr, { 0 }, false);
 	}
 
 	free {
