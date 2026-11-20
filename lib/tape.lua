@@ -191,6 +191,21 @@ function Tape.send_proxies()
   engine.proxy(1, st.path, use1 and a.dir .. 'p1.wav' or '')
 end
 
+-- while the pass runs, the waveform grows: reload the partial peaks file
+-- (level 0 only) every few seconds
+local PEAKS_RELOAD = 3
+local peaks_loaded = 0
+local function analysing(dir)
+  local t = util.time()
+  if t - peaks_loaded < PEAKS_RELOAD then return end
+  peaks_loaded = t
+  local p = Peaks.load(dir .. 'peaks.tmp')
+  if p then
+    st.peaks = p
+    Tape.dirty = true
+  end
+end
+
 local function analysed(dir)
   st.peaks = Peaks.load(dir .. 'peaks')
   Tape.send_proxies()
@@ -218,7 +233,8 @@ function Tape.open(path, start)
   params:set('aur_shuttle', 0, true)
   engine.open(path, start or 0, params:get('aur_ring'))
   send_loop()
-  Analysis.start(path, samples, analysed)
+  peaks_loaded = 0
+  Analysis.start(path, samples, analysed, analysing)
   Tape.dirty = true
   return true
 end
@@ -315,10 +331,15 @@ function Tape.start_polls()
   }
   for name, fn in pairs(handlers) do
     local p = poll.set(name)
+    local last = nil
     p.time = 1 / 20
+    -- redraw only on a change, so a stopped tape doesn't keep the screen busy
     p.callback = function(v)
       fn(v)
-      Tape.dirty = true
+      if v ~= last then
+        last = v
+        Tape.dirty = true
+      end
     end
     p:start()
     polls[#polls + 1] = p

@@ -1,4 +1,4 @@
-# aurotate: implementation plan (draft 4, after phase 2)
+# aurotate: implementation plan (draft 5, after phase 3)
 
 An audio-anthropology workbench for norns: play recordings hours long on an
 analog-feeling tape, mark points and regions, attach notes and per-region
@@ -388,7 +388,7 @@ Write to `_path.data/aurotate/exports/<tape>/`:
 | 0 | ✅ **Feasibility spike** (2026-11-19, Pi 3 only; see §1) | done. Still open: Pi 4 run, CPU numbers (§9.3) |
 | 1 | ✅ **Transport** (2026-11-19, Pi 3; see §9.1): tape voice, jog with inertia (port MultiTape `jog_turn`), shuttle, loop, position poll, params; `spike_test` kept as `test/transport.lua` | done: a 3 h WAV and a 1 h 56 min FLAC field recording play, scrub, loop and park without dropouts; CPU baseline in §9.3; hands-on test on the device: works well. Open: sporadic xruns (§9.1) |
 | 2 | ✅ **Analysis + cache** (2026-11-19, Pi 3; see §9.1): `aurpeaks` + sox in one pass, P1/P2, reduced levels; proxy crossfade, lifter cue, focus on far seeks, shuttle to ±256× | done: CPU at 8–256× recorded (§9.3), far seeks covered by the proxy, analysis during playback without xruns; hands-on on the device: "great" (user, 2026-11-19) |
-| 3 | Tape view UI: zoomed view + whole-tape strip, ruler, zoom, waveform from the raw peaks string, page dots | the waveform reads well at every zoom level, with redraw under budget (≤15 fps, no rendering in poll callbacks). Lua heap measured |
+| 3 | ✅ **Tape view UI** (2026-11-19, Pi 3; see §9.1): zoomed view + whole-tape strip, ruler, zoom, waveform from the raw peaks string, page dots, growing waveform during analysis, focus dither | done: reads well at every zoom (screenshots, `field_L`), redraw 5.5 ms avg at 1×, 8.5 ms at FF 64× (15 fps, no drawing in polls), Lua heap 3.9 MB after GC; hands-on on the device: "works great" (user, 2026-11-20) |
 | 4 | Marks/regions model, tape document store, region drawing, popups, keyboard notes | annotations survive a restart and a PSET change |
 | 5 | Regions list + reader popup, exports (md, Audacity, VTT, CSV), excerpts | export opens correctly in Audacity and a VTT player |
 | 6 | Per-region sound: output stage, fx v2 sends, send-as-insert, boundary glides, current-region params | regions change sound at boundaries without clicks; works without the fx mod |
@@ -424,15 +424,17 @@ lib/ui/regions.lua  settings.lua  popup.lua
 
 ## 9. Development notes (read this first in a new session)
 
-### 9.1 State of the code after phase 2
+### 9.1 State of the code after phase 3
 | file | status |
 |---|---|
+| `lib/ui/tape_view.lua` | Phase 3 tape view: header, ruler, loop bar, waveform (peak columns dim, rms core bright; level from per-tape stretched brightness × loudness), playhead, whole-tape strip (rms heights, levels ≤ 11 so 15 means playhead/bracket) with the view bracket. Columns sit on a fixed grid (k·spp) so they don't shimmer while scrolling; recomputed only when the grid moves. Zooms 1/128…300 s/px while narrower than the tape, then "whole" (the playhead travels). Focus dither within 28 px × proxy share. Header messages (`View.message`) e.g. the zoom span |
+| `lib/ui/draw.lua` | Header with page dots; `Draw.columns` fills one level at a time (≤ 15 fills per call); dotted lines |
 | `lib/sc/AurTape.sc` | The ring + feeder + transport + proxies (P1/P2 PlayBufs synced to the file position, focus crossfade, lifter cue). One instance per voice (`id`; OSC handlers filter on node id + reply id). Next: output stage (phase 6) |
 | `Engine_Aurotate.sc` | Commands: `open sff` (path, start s, ring s), `ring f`, `rate ff`, `jog_nudge f`, `jog_stop f`, `jump f`, `loop iff`, `amp f`, `fade f`, `proxy iss` (level, tape path, proxy path or ""), `lifter f`, `focus f`, `phase s`. Polls: `aur_pos`, `aur_rate`, `aur_ok`, `aur_misses`, `aur_dur`, `aur_proxies` (bitmask), `aur_proxy_share`. **Never name a command `load`** (collides with `engine.load`) |
-| `lib/tape.lua` | Engine glue, transport (play/stop, shuttle steps with detents at 0 and 1×, ±128/256 only with P2, jog ported from `audio.multitape.jog_turn`, K3 loop in/out), proxy budget → `engine.proxy`, params group TAPE (20), polls |
+| `lib/tape.lua` | Engine glue, transport (play/stop, shuttle steps with detents at 0 and 1×, ±128/256 only with P2, jog ported from `audio.multitape.jog_turn`, K3 loop in/out), proxy budget → `engine.proxy`, params group TAPE (20), polls (set `dirty` only when a value changes, so a stopped tape doesn't redraw), reloads `peaks.tmp` every 3 s during the analysis |
 | `lib/analysis.lua` | Cache dir (`<name>-<fnv(path, size, mtime)>`), detached job, 1 s watcher for `done` / `fail` / `progress`, kill on stop |
-| `lib/peaks.lua` | `AURPK2` reader (one string, `string.byte`), `columns(p, t0, t1, w)` picks the coarsest level with ≥ 1 bin per column. Start of phase 3 |
-| `aurotate.lua` | Minimal transport screen: time, state (incl. FOCUS), whole-tape waveform strip from the peaks (brightness → level) with loop band, analysis progress. Replaced by the tape view in phase 3. REPL globals: `dbg_status()`, `transport_test(path, sections)`, `clicks_test(path)` |
+| `lib/peaks.lua` | `AURPK2` reader (one string, `string.byte`), `columns(p, t0, t1, w, amp, rms, bright)` picks the coarsest level with ≥ 1 bin per column and reuses the given arrays; reads ≤ 24 bins per column (strided: only matters for level 0 during analysis). Per-tape stats on load: `peak`, `rpeak`, `blo`/`bhi` (5th/95th percentile of rms-weighted brightness); `height`, `rms_height` (normalised, ^0.6), `bright` (stretched). `secs` = seconds covered |
+| `aurotate.lua` | Pages (collection · **tape** · regions · settings; only tape is built), routing of keys/encs, 15 fps metro gated by `Tape.dirty`, K3 with no tape opens `fileselect`. REPL globals: `dbg_status()` (now with redraw ms and heap), `dbg_reset()`, `dbg_shot(name)` (→ `dust/data/aurotate/<name>.png`, 640×384: the 128×64 screen ×4 at offset 64,64), `dbg.Tape`, `dbg.View`, `transport_test`, `clicks_test` |
 | `test/transport.lua` | Phase 1 sections (idle, 1×, seeks, FF 2–64×, REW, scrub, loops, parking) plus `analysis` (drops the cache, plays 1× through a fresh analysis) and `cue` (FF/REW 8–256×, far seeks with focus); option `proxy_mb`. Not in the default run. Lines now include `mem_avail_mb`, `covers`, `proxy_max`, `p1`, `p2` (proxy state at the end of the phase) |
 | `tools/aurpeaks.c`, `tools/analyze.sh` | The analysis pass (§2.3) |
 
@@ -526,17 +528,58 @@ run on `field_L.flac`, speed/loop/edge sections on `test3h.wav`):
   already booting", matron stuck at "setting up jack clients"). Recovery:
   `sudo systemctl restart norns-jack`, then `norns-main norns-sclang`.
 
-### 9.1b Next: phase 3 (tape view)
-Start from `lib/peaks.lua` (`Peaks.load`, `Peaks.columns`) and the strip in
-`aurotate.lua`'s `redraw`. To do there:
-- level 0 from a *growing* peaks file while the analysis runs (`n0 = 0` in the
-  header means "count from the size"; reload it every few seconds);
-- the brightness → level mapping: on `field_L` (speech) the whole strip came
-  out at levels 4–5; stretch it (per-tape min/max of `bright`, or rms-weighted);
-- zoom from 1/128 s/px to whole tape (§4.1), redraw ≤ 15 fps, no drawing in
-  poll callbacks, Lua heap measured (`collectgarbage('count')`);
-- the FOCUS state is `Tape.focusing()` (`aur_proxy_share` > 0.05 below 6×):
-  draw the dithered waveform near the playhead from it (§4.1).
+**Phase 3 result** (shield, Pi 3B+, `field_L.flac`, P2 loaded; times are
+Lua-side `redraw()`, which includes the screen calls):
+
+| | redraw avg / max | fps |
+|---|---|---|
+| 1×, 1/16 s/px (8 s view) | 5.6 / 19 ms | 15 |
+| 1×, 1/128 s/px (1 s view) | 5.5 / 6.4 ms | 15 |
+| FF 64×, 2 s/px (4 min view) | 8.5 / 23 ms | 15 |
+| analysis running, whole tape (level 0, strided, reloaded every 3 s) | 14.7 / 29 ms | 15 |
+
+Lua heap 3.9 MB after a full GC with `field_L` open (the peaks string is
+1.5 MB); 6–7 MB between collections. No xruns in these runs; scsynth as in
+phase 2. A stopped tape no longer redraws (polls mark dirty only on change).
+
+Decisions made while building it:
+- Waveform: the peak column is dim (0.4 × level) with the rms as a brighter
+  core; level = 3 + 12 × brightness × (0.4 + 0.6 × loudness), because room
+  noise is spectrally "bright" and otherwise drew silence as a level-15 line.
+  Heights are normalised to the tape's loudest bin with a ^0.6 curve.
+- The strip uses rms heights (a 1 min column of speech always peaks near full
+  scale; the rms tells talk from quiet).
+- K1+E2 moves one strip pixel (1/128 of the tape) per tick, like a scrollbar,
+  instead of ±1 min. The seek grace from phase 2 is kept.
+- The other three pages are placeholders, so the dots and K1+E1 work now.
+
+**Open after phase 3:**
+- **First start after boot, once (2026-11-20):** the shield booted straight
+  into aurotate; opening `field_L` drew the waveform but play gave no sound.
+  A script reload then hung on "loading..." for about a minute, played a
+  moment from the start, and came back to "choose a tape". The second load
+  worked, and so did a later reboot straight into aurotate. Not reproduced;
+  the journal isn't persistent (`journalctl --list-boots` shows only the
+  current boot), so no logs. Suspects: the script starting before sclang /
+  the engine is fully ready at boot, or a stuck NRT queue (proxy load +
+  ring reads) on the first open. If it happens again: before rebooting, grab
+  `journalctl -u norns-sclang -u norns-main --no-pager | tail -200` and
+  `dbg_status()`. Consider `Storage=persistent` in journald.conf on the shield.
+- The strip of a 2 h interview is fairly uniform: true to the material; the
+  activity suggestions (§6.4) may be the better overview for speech.
+- Redraw cost is mostly screen calls; if phase 4's region bands push it
+  past ~15 ms, cache the strip in an image buffer (`screen.draw_to`) and only
+  blit it.
+- Ruler has no labels; time-of-day/offset labels at major ticks would need a
+  smaller font than the 8 px one.
+
+### 9.1b Next: phase 4 (marks, regions, store)
+Start from §3 (model) and §4.5–4.6 (controls, keyboard). The tape view draws
+loop and pending-in on the loop bar (y 14) and through the waveform; regions
+go in as inverted bands in `draw_wave` (draw the band, then the waveform cut
+out in level 0) and as segments on the strip. K3 tap → mark, K3 hold → region
+in/out replaces the loop keys (move loop to K1+K2, §4.5). Popups (§4) are a new
+`lib/ui/popup.lua` over the tape view.
 
 ### 9.2 Test assets on the shield (keep; ~2.3 GB)
 `we@10.0.0.138:~/dust/audio/aurotate-spike/`:
@@ -610,6 +653,10 @@ per-voice inserts, fx rack.
   pass leaves its reason in `fail` there (and `build.log` for aurpeaks).
 - sclang Events: a key that is an Object method (`next`, `rate`, `path`,
   `size`…) never reaches the dictionary; `p.next` called `Object:next`.
+- UI checks: `dbg_shot('name')`, then
+  `scp we@10.0.0.138:dust/data/aurotate/name.png .` and crop (64, 64, 576, 320).
+  Force the focus look with `dbg.Tape.focusing = function() return true end`
+  and `dbg.Tape.st.proxy_share = 1` in the same REPL chunk as `dbg_shot`.
 - Tests: `transport_test()` (~8 min) or a subset, e.g.
   `transport_test(nil, {loops = true, edges = true})`; sections `basic`,
   `speed`, `scrub`, `loops`, `edges`. Wait for `dust/data/aurotate/transport_done`.

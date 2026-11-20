@@ -69,8 +69,9 @@ function Analysis.stop()
 end
 
 -- analyse `path` (`frames` long, for the progress) unless its cache is
--- complete; on_done(dir, info) runs when the cache is ready
-function Analysis.start(path, frames, on_done)
+-- complete; on_done(dir, info) runs when the cache is ready, on_progress(dir)
+-- (optional) about once a second while the pass runs
+function Analysis.start(path, frames, on_done, on_progress)
   Analysis.stop()
   local dir = Analysis.cache_dir(path)
   st.dir, st.info, st.err, st.progress = dir, nil, nil, 0
@@ -111,6 +112,7 @@ function Analysis.start(path, frames, on_done)
       end
       local done = tonumber(read_file(dir .. 'progress') or '')
       if done and frames and frames > 0 then st.progress = math.min(1, done / frames) end
+      if on_progress then on_progress(dir) end
     end
   end)
 end
