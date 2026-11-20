@@ -1,4 +1,4 @@
-# aurotate: implementation plan (draft 5, after phase 3)
+# aurotate: implementation plan (draft 6, after phase 4)
 
 An audio-anthropology workbench for norns: play recordings hours long on an
 analog-feeling tape, mark points and regions, attach notes and per-region
@@ -286,7 +286,7 @@ joined** (§6.1).
 Budgets, cue/lifter character, transcription rewind, display (offset or
 wall-clock), MIDI channel and mapping mode, and export.
 
-### 4.5 Controls (tape view, first draft)
+### 4.5 Controls (tape view; built in phase 4)
 | | |
 |---|---|
 | E1 | zoom (K1+E1: change screen) |
@@ -295,15 +295,16 @@ wall-clock), MIDI channel and mapping mode, and export.
 | K2 | play / stop (with auto-rewind if transcription mode is on) |
 | K3 tap | drop a mark |
 | K3 hold, then K3 again | region in, then region out (a selection grows while you hold the first press) |
-| K1+K3 | open the popup for the mark or region under the playhead: note, sound, MIDI |
-| K1+K2 | loop the region under the playhead |
+| K1+K3 | open the popup for the mark or region under the playhead: note, sound, MIDI (cancels a pending region in instead, if there is one) |
+| K1+K2 | loop the region under the playhead (again: loop off) |
 
 ### 4.6 Text entry
 - A **USB keyboard** (`keyboard.char` / `keyboard.code`) is the main way to
   write notes. In the tape view, typing goes to the note of the current
   mark/region. Fixed hotkeys borrow from transcription software: Esc =
-  play/pause with auto-rewind, F1/F2 = −5 s / +5 s, F3 = mark, F4 = region
-  in/out.
+  play/pause with auto-rewind, F6/F7 = −5 s / +5 s, F8 = mark, F9 = region
+  in/out (F1–F5 belong to the system menu: core takes them before the
+  script sees them, so the usual F1–F4 can't be used).
 - On-device, without a keyboard: `textentry` for short labels, plus a
   **tag palette** (a user-editable list) for quick coding.
 - The notes also round-trip as Markdown (§5), so you can do the long writing
@@ -389,7 +390,7 @@ Write to `_path.data/aurotate/exports/<tape>/`:
 | 1 | ✅ **Transport** (2026-11-19, Pi 3; see §9.1): tape voice, jog with inertia (port MultiTape `jog_turn`), shuttle, loop, position poll, params; `spike_test` kept as `test/transport.lua` | done: a 3 h WAV and a 1 h 56 min FLAC field recording play, scrub, loop and park without dropouts; CPU baseline in §9.3; hands-on test on the device: works well. Open: sporadic xruns (§9.1) |
 | 2 | ✅ **Analysis + cache** (2026-11-19, Pi 3; see §9.1): `aurpeaks` + sox in one pass, P1/P2, reduced levels; proxy crossfade, lifter cue, focus on far seeks, shuttle to ±256× | done: CPU at 8–256× recorded (§9.3), far seeks covered by the proxy, analysis during playback without xruns; hands-on on the device: "great" (user, 2026-11-19) |
 | 3 | ✅ **Tape view UI** (2026-11-19, Pi 3; see §9.1): zoomed view + whole-tape strip, ruler, zoom, waveform from the raw peaks string, page dots, growing waveform during analysis, focus dither | done: reads well at every zoom (screenshots, `field_L`), redraw 5.5 ms avg at 1×, 8.5 ms at FF 64× (15 fps, no drawing in polls), Lua heap 3.9 MB after GC; hands-on on the device: "works great" (user, 2026-11-20) |
-| 4 | Marks/regions model, tape document store, region drawing, popups, keyboard notes | annotations survive a restart and a PSET change |
+| 4 | ✅ **Marks, regions, notes** (2026-11-20, Pi 3; see §9.1): model + tape document store, K3 tap/hold gestures, region bands and mark flags, item popup and note editor, USB keyboard notes and hotkeys | done: annotations survive a script reload, a reboot and PSET switches between two tapes (each with its own notes and position); off-device and on-device store tests pass. Hands-on on the device still to do |
 | 5 | Regions list + reader popup, exports (md, Audacity, VTT, CSV), excerpts | export opens correctly in Audacity and a VTT player |
 | 6 | Per-region sound: output stage, fx v2 sends, send-as-insert, boundary glides, current-region params | regions change sound at boundaries without clicks; works without the fx mod |
 | 7 | Region voices + MIDI triggers (note→region mapping and learn, choke groups, one-shot/gate/loop modes) | 4-voice polyphony from MIDI with instant attack |
@@ -421,20 +422,32 @@ lib/ui/regions.lua  settings.lua  popup.lua
 - E1 = zoom, K1+E1 = screen.
 - Overlapping regions mix (§3); masking fails closed.
 - Speaker masking: insert for audition, render to disk for public copies (§4.7).
+- Startup resumes the tape that was open last, where it was left, whatever
+  tape the startup PSET names; loading a PSET during a session switches tapes.
+- A tape's document is `<name>-<fnv(path)>`: same-named files in different
+  folders don't share notes, and editing the audio (mtime, size) doesn't lose
+  them. Moving the file does (phase 8 can relink by name + size).
+- USB keyboard hotkeys are F6–F9 (core owns F1–F5).
 
 ## 9. Development notes (read this first in a new session)
 
-### 9.1 State of the code after phase 3
+### 9.1 State of the code after phase 4
 | file | status |
 |---|---|
-| `lib/ui/tape_view.lua` | Phase 3 tape view: header, ruler, loop bar, waveform (peak columns dim, rms core bright; level from per-tape stretched brightness × loudness), playhead, whole-tape strip (rms heights, levels ≤ 11 so 15 means playhead/bracket) with the view bracket. Columns sit on a fixed grid (k·spp) so they don't shimmer while scrolling; recomputed only when the grid moves. Zooms 1/128…300 s/px while narrower than the tape, then "whole" (the playhead travels). Focus dither within 28 px × proxy share. Header messages (`View.message`) e.g. the zoom span |
-| `lib/ui/draw.lua` | Header with page dots; `Draw.columns` fills one level at a time (≤ 15 fills per call); dotted lines |
+| `lib/model.lua` | Phase 4. The document (§3, without `snd`/`midi` yet): `marks` sorted by `t`, `regions` by `t0`, ids `m<n>`/`r<n>` from one `next_id`, times rounded to 1 ms. Queries: `innermost`, `regions_at` (outermost first, for §3's mixing), `mark_near`, `at` (a mark within tolerance wins over the region it sits in). Every change goes through it and calls `Model.changed`. `validate` runs migrations (`Model.migrations[v]`, none yet), drops malformed items and counts them, keeps `next_id` above every id. Pure Lua, no norns calls |
+| `lib/store.lua` | Phase 4. `dust/data/aurotate/tapes/<name>-<fnv(path)>.lua`, plain Lua loaded with an empty env. Debounced saves (2 s after the last edit, from the UI metro), atomic (`.tmp`, old file → `.bak`, rename). A corrupt file is renamed `.corrupt-<date>` and the `.bak` loaded; a file from a newer version makes the store read-only. No file until a tape gets its first note. `last_tape` (startup resume), `tags.lua` (the tag palette, written with defaults on first use, user-editable) |
+| `lib/annot.lua` | Phase 4. Glue: opens/closes the document with the tape (`Tape.on_open`, saving the old tape's position), K3 tap/hold (hold 0.4 s), pending region in (`Tape.st.pending_in`), "here" (mark within max(3 px, 0.25 s), else innermost region), K1+K2 loop, parks the position every 5 s while stopped. Owns the shared Model/Store instances (`include` runs a file anew each time, so other modules get them from here) |
+| `lib/ui/popup.lua` | Phase 4. Item popup (label, note, tags, in/out or time, delete with confirm; E2 row, E3 value: tags cycle the palette, times nudge 0.1 s / 1 s with K1 and audition the edge 0.3 s after the last tick) and note editor (word wrap, cursor, UTF-8 aware, arrows/Home/End, blink). Background dimmed with `blend_mode('multiply')`. Labels go through `textentry`. User text is drawn in tom-thumb (face 25, 6 px): the norns font has no ä/ö/å |
+| `lib/keys.lua` | Phase 4. USB keyboard: typing on the tape page writes the note of the item here (a new mark when there is none); Esc play/stop with `aur_rewind`, F6/F7 ∓5 s, F8 mark, F9 region in/out, Enter closes (Shift+Enter newline) |
+| `lib/ui/tape_view.lua` | Phase 4: region bands (levels 8/11/13 by overlap depth, 3 for the growing selection) with the waveform and baseline cut out in level 0; on the strip as segments (5/7/9) with the rms columns cut out. Marks: 1 px line (level 7, 12 when here), cut-out notches at the band edges when inside a region; flags at y 15–17 (filled = has a note; regions get one at `t0`); dots on the strip at y 54. All of it per column, not per item, and batched by level (`Draw.add`/`Draw.flush`): a screen call per mark cost ~30 µs, 400 marks were 12 ms. Header shows the label of the item here. `V.redraw` no longer calls `screen.update` (the popup goes over it). Phase 3 tape view: header, ruler, loop bar, waveform (peak columns dim, rms core bright; level from per-tape stretched brightness × loudness), playhead, whole-tape strip (rms heights, levels ≤ 11 so 15 means playhead/bracket) with the view bracket. Columns sit on a fixed grid (k·spp) so they don't shimmer while scrolling; recomputed only when the grid moves. Zooms 1/128…300 s/px while narrower than the tape, then "whole" (the playhead travels). Focus dither within 28 px × proxy share. Header messages (`View.message`) e.g. the zoom span |
+| `lib/ui/draw.lua` | Header with page dots (name optionally in tom-thumb); `Draw.columns` fills one level at a time (levels 0–15, 0 cuts out); `Draw.runs` (runs of equal levels → one rect each); `Draw.add`/`Draw.flush` (rects batched per level); dotted lines |
 | `lib/sc/AurTape.sc` | The ring + feeder + transport + proxies (P1/P2 PlayBufs synced to the file position, focus crossfade, lifter cue). One instance per voice (`id`; OSC handlers filter on node id + reply id). Next: output stage (phase 6) |
 | `Engine_Aurotate.sc` | Commands: `open sff` (path, start s, ring s), `ring f`, `rate ff`, `jog_nudge f`, `jog_stop f`, `jump f`, `loop iff`, `amp f`, `fade f`, `proxy iss` (level, tape path, proxy path or ""), `lifter f`, `focus f`, `phase s`. Polls: `aur_pos`, `aur_rate`, `aur_ok`, `aur_misses`, `aur_dur`, `aur_proxies` (bitmask), `aur_proxy_share`. **Never name a command `load`** (collides with `engine.load`) |
-| `lib/tape.lua` | Engine glue, transport (play/stop, shuttle steps with detents at 0 and 1×, ±128/256 only with P2, jog ported from `audio.multitape.jog_turn`, K3 loop in/out), proxy budget → `engine.proxy`, params group TAPE (20), polls (set `dirty` only when a value changes, so a stopped tape doesn't redraw), reloads `peaks.tmp` every 3 s during the analysis |
+| `lib/tape.lua` | Engine glue, transport (play/stop, shuttle steps with detents at 0 and 1×, ±128/256 only with P2, jog ported from `audio.multitape.jog_turn`, `Tape.loop(a, b)` for K1+K2, `toggle_rewind` for Esc), `Tape.on_open` hook (returns the start position from the document), `Tape.hold_open` (startup), proxy budget → `engine.proxy`, params group TAPE (22, now with `aur_rewind`), polls (set `dirty` only when a value changes, so a stopped tape doesn't redraw), reloads `peaks.tmp` every 3 s during the analysis |
 | `lib/analysis.lua` | Cache dir (`<name>-<fnv(path, size, mtime)>`), detached job, 1 s watcher for `done` / `fail` / `progress`, kill on stop |
 | `lib/peaks.lua` | `AURPK2` reader (one string, `string.byte`), `columns(p, t0, t1, w, amp, rms, bright)` picks the coarsest level with ≥ 1 bin per column and reuses the given arrays; reads ≤ 24 bins per column (strided: only matters for level 0 during analysis). Per-tape stats on load: `peak`, `rpeak`, `blo`/`bhi` (5th/95th percentile of rms-weighted brightness); `height`, `rms_height` (normalised, ^0.6), `bright` (stretched). `secs` = seconds covered |
-| `aurotate.lua` | Pages (collection · **tape** · regions · settings; only tape is built), routing of keys/encs, 15 fps metro gated by `Tape.dirty`, K3 with no tape opens `fileselect`. REPL globals: `dbg_status()` (now with redraw ms and heap), `dbg_reset()`, `dbg_shot(name)` (→ `dust/data/aurotate/<name>.png`, 640×384: the 128×64 screen ×4 at offset 64,64), `dbg.Tape`, `dbg.View`, `transport_test`, `clicks_test` |
+| `aurotate.lua` | Pages (collection · **tape** · regions · settings; only tape is built), routing of keys/encs (to the popup when one is open), 15 fps metro gated by `Tape.dirty` (also runs `Annot.tick`: K3 hold, parking, debounced saves), K3 with no tape opens `fileselect`. Startup: `params:default()` with `Tape.hold_open`, then the last tape. `params.action_write` flushes the document. Phase 4 globals: `notes_test()`, `dbg.Annot`, `dbg.Popup`, `dbg.Keys`; `dbg_status()` prints a NOTES line. REPL globals: `dbg_status()` (now with redraw ms and heap), `dbg_reset()`, `dbg_shot(name)` (→ `dust/data/aurotate/<name>.png`, 640×384: the 128×64 screen ×4 at offset 64,64), `dbg.Tape`, `dbg.View`, `transport_test`, `clicks_test` |
+| `test/model_test.lua` | Phase 4: model + store (44 checks: ordering, queries, edge clamps, round trip incl. quotes/newlines/UTF-8, `.bak`, corrupt → `.bak`, newer → read-only and untouched, malformed items dropped, no file for an empty tape, palette, ids). `lua5.3 test/model_test.lua` off the device, `notes_test()` on it |
 | `test/transport.lua` | Phase 1 sections (idle, 1×, seeks, FF 2–64×, REW, scrub, loops, parking) plus `analysis` (drops the cache, plays 1× through a fresh analysis) and `cue` (FF/REW 8–256×, far seeks with focus); option `proxy_mb`. Not in the default run. Lines now include `mem_avail_mb`, `covers`, `proxy_max`, `p1`, `p2` (proxy state at the end of the phase) |
 | `tools/aurpeaks.c`, `tools/analyze.sh` | The analysis pass (§2.3) |
 
@@ -573,13 +586,48 @@ Decisions made while building it:
 - Ruler has no labels; time-of-day/offset labels at major ticks would need a
   smaller font than the 8 px one.
 
-### 9.1b Next: phase 4 (marks, regions, store)
-Start from §3 (model) and §4.5–4.6 (controls, keyboard). The tape view draws
-loop and pending-in on the loop bar (y 14) and through the waveform; regions
-go in as inverted bands in `draw_wave` (draw the band, then the waveform cut
-out in level 0) and as segments on the strip. K3 tap → mark, K3 hold → region
-in/out replaces the loop keys (move loop to K1+K2, §4.5). Popups (§4) are a new
-`lib/ui/popup.lua` over the tape view.
+**Phase 4 result** (shield, Pi 3B+, 260616):
+
+| | |
+|---|---|
+| restart | script reload and a full reboot: the last tape reopens at its saved position with its notes (after the reboot, test30m at 135 s, although PSET 1 named field_L) |
+| PSET | two PSETs naming two tapes: read 1 / 2 / 1 switches tape, notes and position each time |
+| gestures (REPL-driven `key`/`enc`/`keyboard.*`) | K3 tap/hold/out, K1+K3 popup and cancel, K1+K2 loop on/off (stays inside 130–140 s while playing), Esc resume with 2 s rewind, F6/F7, F8, F9 in/out, popup in-edge nudge +1.0 s with audition, delete with confirm, textentry label (open, cancel, back to the popup), editor cursor keys over soft wraps |
+| redraw, 1× (field_L / test30m, a few notes) | 7–9 ms avg, 15 fps; with the editor open and typing for 60 s: 8.9 ms avg, 0 xruns |
+| redraw, stress (test3h, 400 marks + 150 overlapping regions) | +4–9 ms over the same view without notes (12–15 ms avg at 8 s view and whole tape) |
+
+Decisions made while building it (see also §8):
+- Typing with nothing under the playhead makes a mark there and writes its
+  note: the common transcription move is "stop, type what was said".
+- Region out is taken at the K3 press; a mark at the K3 press (not release).
+- In the editor, Enter closes (Shift+Enter is a new line); Esc stays
+  play/stop so you can type and transport without leaving the editor.
+- Tag palette defaults: interview, story, song, ritual, place, name, todo,
+  private (`private` is meant for §4.7's "notes marked private").
+
+**Open after phase 4:**
+- **Hands-on on the device** (K3 hold timing, popup reading, USB keyboard
+  typing with a real keyboard and a Finnish layout).
+- **Xruns while analysing a 3 h stereo WAV** (phase 2 issue, found now):
+  one analysis job of `test3h.wav` gave ~50 xruns a minute ("SuperCollider
+  was not finished"), during 1× play and idle alike; field_L (mono FLAC)
+  gave none in phase 2. Earlier the same session several overlapping jobs
+  ran (script reloads during an analysis) and left a cache with both `done`
+  and `fail`; `analyze.sh` now takes a `flock` per cache dir, so a second
+  job exits. Look at the single-job case: CPU (sox + tee + aurpeaks at
+  nice 10), SD bandwidth or IRQs; try `ionice -c 3`, a smaller pipe buffer,
+  or throttling (`pv -L`).
+- Popup and editor have no K1+E1 page change (E1 still zooms behind them).
+- The tom-thumb font lacks some punctuation (– …); ASCII and Latin-1 letters
+  are fine.
+
+### 9.1b Next: phase 5 (regions list, reader popup, exports)
+Start from §4.3 and §5. The regions page is the third page dot (placeholder
+in `aurotate.lua`). `Model` already keeps marks and regions sorted; the list
+merges them by `Model.start`. The reader popup can reuse the editor's wrap
+(`lib/ui/popup.lua`, read-only, E2/E3 scroll). Exports go to
+`dust/data/aurotate/exports/<tape>/`; the ids (`m3`, `r12`) are stable for
+the `<!-- aur:r12 -->` round trip.
 
 ### 9.2 Test assets on the shield (keep; ~2.3 GB)
 `we@10.0.0.138:~/dust/audio/aurotate-spike/`:
@@ -647,6 +695,13 @@ per-voice inserts, fx rack.
   load the script and **grep the sclang journal for errors**. The REPL says
   `<ok>` even when the SynthDef failed.
 - Lua-only changes: `norns.script.load("code/aurotate/aurotate.lua")`.
+- Model/store tests: `lua5.3 test/model_test.lua` locally (no norns
+  needed), `notes_test()` on the device (scratch dir under
+  `dust/data/aurotate/model_test/`, removed when all pass).
+- Tape documents: `dust/data/aurotate/tapes/`. Test notes go into the real
+  tape's document; delete it afterwards (field_L's is private research).
+- `reboot` doesn't save the "last script" state (SLEEP does), so after a
+  reboot load the script from the REPL.
 - Phase 2 tests: `transport_test(nil, {analysis = true, cue = true})` (~5 min),
   `transport_test(nil, {cue = true, proxy_mb = 300})` for P1 on a long file.
   The analysis cache is `dust/data/aurotate/cache/<name>-<hash>/`; a failed

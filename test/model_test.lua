@@ -1,0 +1,158 @@
+-- model + store tests, off the device: `lua5.3 test/model_test.lua` from the
+-- repo root (on the device they run from the REPL with notes_test())
+
+local on_norns = include ~= nil
+if not on_norns then
+  include = function(p) return dofile(p .. '.lua') end
+end
+
+local Model = include 'lib/model'
+local Store = include 'lib/store'
+
+local T = {}
+local fails, passes = 0, 0
+local function check(name, ok, detail)
+  if ok then
+    passes = passes + 1
+  else
+    fails = fails + 1
+    print('FAIL ' .. name .. (detail and (': ' .. tostring(detail)) or ''))
+  end
+end
+
+local function rm_rf(d) os.execute("rm -rf '" .. d .. "'") end
+
+function T.run(dir)
+  fails, passes = 0, 0
+  dir = dir or (os.getenv('TMPDIR') or '/tmp') .. '/aurotate-model-test-' .. os.time() .. '/'
+  rm_rf(dir)
+  local now = 1000
+  Store.init(dir, function() return now end)
+  Model.changed = function() Store.touch() end
+
+  -- model basics
+  local doc = Model.new('/x/tape one.flac', 3600, 123)
+  local m2 = Model.add_mark(doc, 20)
+  local m1 = Model.add_mark(doc, 10)
+  check('marks sorted', doc.marks[1] == m1 and doc.marks[2] == m2)
+  check('ids', m2.id == 'm1' and m1.id == 'm2', m2.id .. ' ' .. m1.id)
+  local outer = Model.add_region(doc, 100, 50)
+  local inner = Model.add_region(doc, 60, 70)
+  check('region order', outer.t0 == 50 and outer.t1 == 100)
+  check('too short', Model.add_region(doc, 5, 5.01) == nil)
+  check('innermost', Model.innermost(doc, 65) == inner)
+  check('innermost outside', Model.innermost(doc, 80) == outer)
+  check('none', Model.innermost(doc, 200) == nil)
+  local at = Model.regions_at(doc, 65)
+  check('regions_at outermost first', at[1] == outer and at[2] == inner and #at == 2)
+  check('mark near', Model.mark_near(doc, 10.2, 0.25) == m1)
+  check('mark not near', Model.mark_near(doc, 11, 0.25) == nil)
+  check('at prefers mark', Model.at(doc, 10.1, 0.25) == m1)
+  check('end exclusive', Model.innermost(doc, 70) == outer)
+  Model.move(doc, inner, 't1', 40) -- can't cross t0
+  check('edge clamp', math.abs(inner.t1 - (inner.t0 + Model.MIN_REGION)) < 1e-9, inner.t1)
+  Model.move(doc, m1, 't', 30)
+  check('resort marks', doc.marks[1] == m2 and doc.marks[2] == m1)
+  Model.toggle_tag(doc, m1, 'kin')
+  Model.toggle_tag(doc, outer, 'place')
+  check('tags', table.concat(Model.tags(doc), ',') == 'kin,place')
+  Model.toggle_tag(doc, m1, 'kin')
+  check('untag', #m1.tags == 0)
+
+  -- store: a round trip
+  local path = '/x/tape one.flac'
+  local d = Store.open(path, 3600, 999)
+  check('new doc', #d.marks == 0 and d.tape.path == path)
+  check('nothing pending', not Store.pending())
+  local m = Model.add_mark(d, 12.345678901)
+  Model.set(d, m, 'note', 'line one\nline "two" ä\\')
+  Model.toggle_tag(d, m, 'story')
+  local r = Model.add_region(d, 1.5, 9.25)
+  Model.set(d, r, 'label', 'intro')
+  check('pending after edit', Store.pending())
+  Store.tick()
+  check('debounced', Store.pending())
+  now = now + 3
+  Store.tick()
+  check('saved', not Store.pending())
+  local f = io.open(Store.path_of(path))
+  check('file exists', f ~= nil)
+  if f then f:close() end
+  Store.close(42.5)
+  local d2, msg = Store.open(path, 3600, 999)
+  check('reload msg', msg == nil, msg)
+  check('reload marks', #d2.marks == 1 and d2.marks[1].note == 'line one\nline "two" ä\\', d2.marks[1] and d2.marks[1].note)
+  check('reload rounded to ms', d2.marks[1].t == 12.346, d2.marks[1].t)
+  check('reload tags', d2.marks[1].tags[1] == 'story')
+  check('reload region', #d2.regions == 1 and d2.regions[1].label == 'intro' and d2.regions[1].t1 == 9.25)
+  check('last pos', d2.tape.last_pos == 42.5, d2.tape.last_pos)
+  check('next id', d2.next_id == 3, d2.next_id)
+  check('last tape', Store.last() == path)
+
+  -- .bak keeps the previous save
+  Model.add_mark(d2, 99)
+  Store.flush()
+  local bak = loadfile(Store.path_of(path) .. '.bak', 't', {})
+  check('bak is previous', bak and #bak().marks == 1)
+
+  -- corrupt file: set aside, previous save restored
+  Store.close()
+  local fw = io.open(Store.path_of(path), 'w')
+  fw:write('return { version = 1, marks = { oops')
+  fw:close()
+  local d3, msg3 = Store.open(path, 3600)
+  check('corrupt -> bak', d3 and #d3.marks == 1, #d3.marks)
+  check('corrupt msg', msg3 and msg3:find('previous', 1, true), msg3)
+  local ls = io.popen("ls '" .. dir .. "tapes/'"):read('a')
+  check('corrupt kept aside', ls:find('corrupt', 1, true), ls)
+  Store.close()
+
+  -- newer version: read-only, never overwritten
+  local p2 = '/x/newer.wav'
+  fw = io.open(Store.path_of(p2), 'w')
+  fw:write('return { version = 99, marks = {} }')
+  fw:close()
+  local d4, msg4 = Store.open(p2, 10)
+  check('newer readonly', Store.readonly() ~= nil and msg4 ~= nil, msg4)
+  Model.add_mark(d4, 1)
+  Store.flush()
+  Store.close(5)
+  local src = io.open(Store.path_of(p2)):read('a')
+  check('newer untouched', src:find('version = 99', 1, true) ~= nil)
+
+  -- damaged entries are left out, not fatal
+  local p3 = '/x/partial.wav'
+  fw = io.open(Store.path_of(p3), 'w')
+  fw:write([[return { version = 1, next_id = 2, marks = { { id = "m1", t = 3 }, { id = "m1", t = 4 }, { t = 5 } },
+    regions = { { id = "r7", t0 = 2, t1 = 1 }, { id = "r8", t0 = 1, t1 = 2, tags = { "a", 3, "a" } } } }]])
+  fw:close()
+  local d5, msg5 = Store.open(p3, 10)
+  check('partial marks', #d5.marks == 1 and d5.marks[1].label == '')
+  check('partial regions', #d5.regions == 1 and #d5.regions[1].tags == 1)
+  check('partial next id above max', d5.next_id == 9, d5.next_id)
+  check('partial msg', msg5 and msg5:find('3 damaged', 1, true), msg5)
+  Store.close()
+
+  -- a tape with no notes writes no file
+  local p4 = '/x/empty.wav'
+  Store.open(p4, 10)
+  Store.close(5)
+  check('no file for empty tape', io.open(Store.path_of(p4)) == nil)
+
+  -- palette
+  local pal = Store.palette()
+  check('palette defaults', #pal == #Store.DEFAULT_TAGS)
+  check('palette file', io.open(dir .. 'tags.lua') ~= nil)
+
+  -- the id: same name, other folder → other document
+  check('ids differ', Store.id('/a/x.wav') ~= Store.id('/b/x.wav'))
+
+  print(string.format('model_test: %d passed, %d failed', passes, fails))
+  if fails == 0 then rm_rf(dir) end
+  return fails
+end
+
+if not on_norns then
+  os.exit(T.run() == 0 and 0 or 1)
+end
+return T

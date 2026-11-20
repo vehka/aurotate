@@ -4,8 +4,11 @@
 --  y  0–8   header: page dots · name · state · time
 --     10–13 ruler
 --     14    loop bar
---     16–50 waveform (playhead at x = 64)
---     54–63 whole tape: waveform, loop, bracket for the part shown above
+--     15–17 flags: marks, and regions at their start (filled: has a note)
+--     16–50 waveform (playhead at x = 64); regions are bands with the
+--           waveform cut out of them (a negative), marks 1 px lines
+--     54    marks on the whole tape (dots)
+--     54–63 whole tape: waveform, regions, loop, bracket for the part shown above
 
 local Peaks = include 'lib/peaks'
 local Draw = include 'lib/ui/draw'
@@ -35,6 +38,10 @@ local last_misses = 0
 local amp, rms, bright = {}, {}, {}
 local h_out, l_out, h_in, l_in, skip = {}, {}, {}, {}, {}
 local cols = { peaks = nil, spp = nil, t0 = nil }
+local band, sband = {}, {} -- per column: region band level (0 none), view and strip
+local BAND = { 8, 11, 13 }    -- by depth of overlap
+local SBAND = { 5, 7, 9 }
+local PENDING = 3             -- the selection while a region is being made
 local ov = { peaks = nil, dur = nil, amp = {}, rms = {}, bright = {}, h = {}, lv = {} }
 
 ---- zoom
@@ -164,6 +171,121 @@ local function draw_loop(st, spp, t0, ph_x)
   end
 end
 
+-- columns covered by [a, b) (at least one)
+local function x_range(a, b, t0, spp)
+  local x0 = math.floor((a - t0) / spp)
+  local x1 = math.ceil((b - t0) / spp) - 1
+  if x1 < x0 then x1 = x0 end
+  return math.max(0, x0), math.min(W - 1, x1)
+end
+
+-- band levels per column for the regions (and the growing selection)
+local function fill_bands(doc, st, out, levels, t0, spp)
+  for i = 1, W do out[i] = 0 end
+  local t1 = t0 + W * spp
+  if doc then
+    for _, r in ipairs(doc.regions) do
+      if r.t0 >= t1 then break end
+      if r.t1 > t0 then
+        local x0, x1 = x_range(r.t0, r.t1, t0, spp)
+        for x = x0 + 1, x1 + 1 do out[x] = out[x] + 1 end
+      end
+    end
+    for i = 1, W do
+      local d = out[i]
+      if d > 0 then out[i] = levels[math.min(d, #levels)] end
+    end
+  end
+  if st.pending_in then
+    local a, b = math.min(st.pending_in, st.pos), math.max(st.pending_in, st.pos)
+    if b > t0 and a < t1 then
+      local x0, x1 = x_range(a, b, t0, spp)
+      for x = x0 + 1, x1 + 1 do
+        if out[x] == 0 then out[x] = PENDING end
+      end
+    end
+  end
+end
+
+-- a level-0 line through the band columns at y (cuts the baseline out);
+-- one rect per run of band columns
+local function cut_line(out, y)
+  local any, i = false, 1
+  while i <= W do
+    if out[i] > 0 then
+      local j = i
+      while j < W and out[j + 1] > 0 do j = j + 1 end
+      screen.rect(i - 1, y, j - i + 1, 1)
+      any = true
+      i = j + 1
+    else
+      i = i + 1
+    end
+  end
+  if any then
+    screen.level(0)
+    screen.fill()
+  end
+end
+
+-- flag at the top of x: a filled box with a note, an outline without
+-- (batched: Draw.flush fills it)
+local function flag(x, filled, level)
+  if filled then
+    Draw.add(level, x, 15, 4, 3)
+  else
+    Draw.add(level, x, 15, 4, 1)
+    Draw.add(level, x, 17, 4, 1)
+    Draw.add(level, x + 3, 16, 1, 1)
+  end
+end
+
+-- per column: 0 none, 1 flag, 2 flag with a note, +4 the item "here"
+local mcol, rcol = {}, {}
+
+local function flag_level(v) return v >= 4 and 15 or 10 end
+
+-- marks and region flags, one per column however many share it (a whole
+-- tape of 400 marks draws 128 columns, not 400 lines)
+local function draw_marks(doc, t0, spp, here)
+  if not doc then return end
+  local t1 = t0 + W * spp
+  for i = 1, W do mcol[i], rcol[i] = 0, 0 end
+  local function put(col, x, item)
+    local v = (item.note ~= '' and 2 or 1) + (item == here and 4 or 0)
+    local o = col[x + 1]
+    col[x + 1] = math.max(o % 4, v % 4) + ((o >= 4 or v >= 4) and 4 or 0)
+  end
+  for _, r in ipairs(doc.regions) do
+    if r.t0 >= t1 then break end
+    if r.t0 >= t0 then put(rcol, math.floor((r.t0 - t0) / spp), r) end
+  end
+  for _, m in ipairs(doc.marks) do
+    if m.t >= t1 then break end
+    if m.t >= t0 then put(mcol, math.floor((m.t - t0) / spp), m) end
+  end
+  local bot = WAVE_Y + WAVE_H
+  for x = 0, W - 1 do
+    local v = mcol[x + 1]
+    if v > 0 then
+      if band[x + 1] > 0 then
+        -- inside a band: notches cut out at its top and bottom, so dense
+        -- marks don't erase the band
+        Draw.add(0, x, 18, 1, 2)
+        Draw.add(0, x, bot - 2, 1, 3)
+      else
+        Draw.add(v >= 4 and 12 or 7, x, 18, 1, bot - 17)
+      end
+    end
+  end
+  Draw.flush() -- the lines first: the flags go over them
+  for x = 0, W - 1 do
+    local v = math.max(mcol[x + 1], rcol[x + 1])
+    if v > 0 then flag(x, v % 4 == 2, flag_level(v)) end
+  end
+  Draw.flush()
+end
+
 local function draw_wave(Tape, st, spp, t0, ph_x)
   local p = st.peaks
   local x_from = math.max(0, math.ceil(-t0 / spp))
@@ -196,18 +318,22 @@ local function draw_wave(Tape, st, spp, t0, ph_x)
     h_out[n], l_out[n] = ho, math.max(1, math.floor(l * 0.4))
     h_in[n], l_in[n] = hi == 0 and -1 or math.min(hi, ho), l
     if ho == 0 then h_out[n] = -1 end -- silence: the baseline below shows
+    if band[x + 1] > 0 then l_out[n], l_in[n] = 0, 0 end -- cut out of the region
   end
   screen.level(1)
   screen.rect(x_from, WAVE_Y, x_peaks - x_from + 1, 1)
   screen.fill()
+  cut_line(band, WAVE_Y)
   Draw.columns(x_from, WAVE_Y, n, h_out, l_out, skip)
   Draw.columns(x_from, WAVE_Y, n, h_in, l_in, skip)
 end
 
-local function draw_strip(st, spp, t0, fit)
+local function draw_strip(st, spp, t0, fit, doc)
   local p = st.peaks
   local sx = W / math.max(st.dur, 1e-3)
   local function x_of(t) return util.clamp(math.floor(t * sx), 0, W - 1) end
+  fill_bands(doc, st, sband, SBAND, 0, 1 / sx)
+  Draw.runs(0, STRIP_Y - STRIP_H, 2 * STRIP_H + 1, W, sband)
   if params:get('aur_loop') == 1 then
     local a, b = params:get('aur_loop_in'), params:get('aur_loop_out')
     if a > b then a, b = b, a end
@@ -233,7 +359,16 @@ local function draw_strip(st, spp, t0, fit)
     screen.level(1)
     screen.rect(0, STRIP_Y, x_peaks + 1, 1)
     screen.fill()
-    Draw.columns(0, STRIP_Y, x_peaks + 1, ov.h, ov.lv)
+    cut_line(sband, STRIP_Y)
+    -- inside a region the columns are cut out (levels copied, not cached)
+    for i = 1, x_peaks + 1 do l_out[i] = sband[i] > 0 and 0 or ov.lv[i] end
+    Draw.columns(0, STRIP_Y, x_peaks + 1, ov.h, l_out)
+  end
+  if doc and #doc.marks > 0 then
+    -- one dot per column (a screen call per mark costs ~30 µs on a Pi 3)
+    for i = 1, W do mcol[i] = 0 end
+    for _, m in ipairs(doc.marks) do mcol[x_of(m.t) + 1] = 1 end
+    Draw.runs(0, 54, 1, W, mcol, 12)
   end
   -- bracket: the part shown above
   if not fit then
@@ -256,34 +391,39 @@ local function draw_strip(st, spp, t0, fit)
   screen.fill()
 end
 
-function V.redraw(Tape, page, pages)
+-- draws the frame without screen.update (popups go over it). `doc` is the
+-- tape document, `here` the mark or region under the playhead.
+function V.redraw(Tape, page, pages, doc, here)
   local st = Tape.st
   frame = frame + 1
   screen.clear()
   screen.aa(0)
   screen.line_width(1)
   local state, slev = state_label(Tape, st)
-  Draw.header(page, pages, st.name, state, slev,
-    st.path and Tape.hms(st.pos, true) or nil)
+  local name, nlev, nfont = st.name, 4, false
+  if here then name, nlev, nfont = here.label ~= '' and here.label or here.id, 12, here.label ~= '' end
+  Draw.header(page, pages, name, state, slev,
+    st.path and Tape.hms(st.pos, true) or nil, nlev, nfont)
   if not st.path then
     screen.level(4)
     screen.move(64, 34)
     screen.text_center('K3: choose a tape')
     screen.move(64, 44)
     screen.text_center('(or PARAMS > TAPE)')
-    screen.update()
     return
   end
   local spp, t0, ph_x, fit = V.view(st)
   draw_ruler(spp, t0, st.dur)
   draw_loop(st, spp, t0, ph_x)
+  fill_bands(doc, st, band, BAND, t0, spp)
+  Draw.runs(0, WAVE_Y - WAVE_H, 2 * WAVE_H + 1, W, band)
   draw_wave(Tape, st, spp, t0, ph_x)
+  draw_marks(doc, t0, spp, here)
   -- playhead (dim while the chunk under it loads)
   screen.level(st.ok > 0 and 15 or 5)
   screen.rect(ph_x, RULER_Y, 1, LOOP_Y - RULER_Y + 2 * WAVE_H + 3)
   screen.fill()
-  draw_strip(st, spp, t0, fit)
-  screen.update()
+  draw_strip(st, spp, t0, fit, doc)
 end
 
 return V

@@ -2,7 +2,7 @@
 -- an audio-anthropology workbench:
 -- hours-long recordings on tape
 --
--- phase 3: tape view
+-- phase 4: marks, regions, notes
 --
 -- E1 zoom
 -- K1+E1 page
@@ -11,8 +11,11 @@
 -- E3 speed (shuttle ±64, ±256
 --    once analysed)
 -- K2 play / stop
--- K3 loop in, out, off
--- K1+K3 cancel loop in
+-- K3 tap: mark
+-- K3 hold: region in; K3: out
+-- K1+K3 note popup (or cancel in)
+-- K1+K2 loop the region (or off)
+-- USB keyboard: type a note
 --
 -- tape: K3 or PARAMS > TAPE
 
@@ -22,6 +25,9 @@ local fileselect = require 'fileselect'
 local Tape = include 'lib/tape'
 local Draw = include 'lib/ui/draw'
 local View = include 'lib/ui/tape_view'
+local Annot = include 'lib/annot'
+local Popup = include 'lib/ui/popup'
+local Keys = include 'lib/keys'
 
 local st = Tape.st
 local shift = false
@@ -59,12 +65,32 @@ local function choose_tape()
 end
 
 function init()
+  Annot.init(Tape, View)
+  Popup.init(Tape, Annot)
+  Keys.init(Tape, Annot, Popup, function() return PAGES[page] == 'tape' and not selecting end)
+  Tape.on_open = function(path, dur)
+    Popup.reset()
+    return Annot.switch(path, dur)
+  end
   Tape.add_params()
+  -- the PSET holds only the tape's path (aur_file); its notes live in the
+  -- tape document, saved on their own. Writing a PSET is a good moment to
+  -- make sure they are on disk.
+  params.action_write = function() Annot.flush() end
+  -- startup resumes the tape open last (where it was left), whatever tape
+  -- the startup PSET names; loading a PSET later switches tapes
+  Tape.hold_open = true
   params:default()
+  Tape.hold_open = false
+  local last = Annot.last_tape()
+  if last and util.file_exists(last) then params:set('aur_file', last, true) end
+  Tape.open(params:get('aur_file'))
   Tape.start_polls()
   redraw_metro = metro.init(function()
-    if selecting then return end
+    Annot.tick()
+    if selecting or Popup.modal then return end
     if View.tick() then Tape.dirty = true end
+    if Popup.tick() then Tape.dirty = true end
     if Tape.dirty then
       Tape.dirty = false
       redraw()
@@ -79,18 +105,26 @@ function key(n, z)
     if z == 0 and util.time() - last_seek < SEEK_GRACE then last_seek = util.time() end
     return
   end
-  if z == 0 or PAGES[page] ~= 'tape' then return end
-  if n == 2 then
-    Tape.toggle()
-  elseif n == 3 then
-    if not st.path then
-      choose_tape()
-    elseif shift then
-      Tape.loop_cancel()
-    else
-      Tape.loop_key()
-    end
+  if PAGES[page] ~= 'tape' then return end
+  if Popup.active() then
+    Popup.key(n, z, shift)
+    return
   end
+  if n == 3 then
+    if not st.path then
+      if z == 1 then choose_tape() end
+    elseif shift then
+      if z == 1 and not Annot.cancel() then
+        local item = Annot.here()
+        if item then Popup.open_item(item) else View.message('NOTHING HERE', 1) end
+      end
+    else
+      Annot.k3(z)
+    end
+  elseif n == 2 and z == 1 then
+    if shift then Annot.loop_here() else Tape.toggle() end
+  end
+  Tape.dirty = true
 end
 
 function enc(n, d)
@@ -100,6 +134,10 @@ function enc(n, d)
     return
   end
   if PAGES[page] ~= 'tape' then return end
+  if Popup.active() and n ~= 1 then
+    Popup.enc(n, d, shift)
+    return
+  end
   if n == 1 then
     View.zoom_turn(st, d)
     Tape.dirty = true
@@ -119,7 +157,9 @@ end
 function redraw()
   local t = util.time()
   if PAGES[page] == 'tape' then
-    View.redraw(Tape, page, #PAGES)
+    View.redraw(Tape, page, #PAGES, Annot.doc(), Annot.here())
+    Popup.redraw()
+    screen.update()
   elseif PAGES[page] == 'collection' then
     placeholder('collection', 8)
   elseif PAGES[page] == 'regions' then
@@ -142,11 +182,21 @@ function dbg_status()
     params:get('aur_loop'), params:get('aur_loop_in'), params:get('aur_loop_out'),
     _norns.audio_get_xrun_count(), _norns.audio_get_cpu_load(),
     an.state, an.progress * 100, st.proxies, st.proxy_share))
+  local doc, here = Annot.doc(), Annot.here()
+  print(string.format('NOTES %s marks %d regions %d HERE %s PENDING %s POPUP %s',
+    doc and Annot.doc_path() or '-', doc and #doc.marks or 0, doc and #doc.regions or 0,
+    here and here.id or '-', tostring(st.pending_in), tostring(Popup.kind())))
 end
 
 -- automated transport run; see test/transport.lua
 function transport_test(path, only)
   return include('test/transport').run(Tape, path, only)
+end
+
+-- model + store tests in a scratch dir (also runs off the device:
+-- lua5.3 test/model_test.lua)
+function notes_test()
+  return include('test/model_test').run(norns.state.data .. 'model_test/')
 end
 
 function clicks_test(path)
@@ -155,7 +205,7 @@ end
 
 -- REPL handles: dbg.Tape, dbg.View; dbg_shot(name) redraws and saves the
 -- screen to dust/data/aurotate/<name>.png
-dbg = { Tape = Tape, View = View }
+dbg = { Tape = Tape, View = View, Annot = Annot, Popup = Popup, Keys = Keys }
 function dbg_shot(name)
   redraw()
   screen.export_screenshot(name or 'screen')
@@ -168,5 +218,6 @@ end
 
 function cleanup()
   if redraw_metro then redraw_metro:stop() end
+  Annot.cleanup()
   Tape.cleanup()
 end

@@ -10,6 +10,7 @@
 #   info       key=value: frames, rate, channels, p1_rate, p2_rate, secs, bext_*
 #   progress   frames analysed so far (from aurpeaks)
 #   pid        while running (the process group id: kill -- -<pid>)
+#   lock       flock'd while a job runs; a second job for the dir exits
 #   done       when finished; `fail` (with the reason) otherwise
 #
 # Builds aurpeaks from aurpeaks.c next to this script when the binary is
@@ -23,6 +24,11 @@ src=$(cd "$(dirname "$0")" && pwd)/aurpeaks.c
 
 mkdir -p "$dir" || exit 1
 cd "$dir" || exit 1
+# one job per cache dir. A job the script couldn't kill (stopped before it
+# wrote its pid) would otherwise run alongside the next one: two decoders
+# fighting over the same files (and the SD card, which gave xruns)
+exec 9> lock
+flock -n 9 || exit 0
 rm -f done fail progress info peaks p1.wav p2.wav ./*.tmp ./*.tmp.wav fifo_*
 echo $$ > pid
 t0=$(date +%s.%N)

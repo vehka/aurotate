@@ -84,6 +84,16 @@ function Tape.toggle()
   if Tape.playing() then Tape.stop() else Tape.play() end
 end
 
+-- play / stop for transcription: resuming backs up `secs` first
+function Tape.toggle_rewind(secs)
+  if Tape.playing() then
+    Tape.stop()
+  else
+    if secs and secs > 0 then Tape.jump(st.pos - secs) end
+    Tape.play()
+  end
+end
+
 local function nearest_step(r)
   local best, bi = math.huge, 1
   for i, v in ipairs(Tape.SHUTTLE) do
@@ -147,27 +157,11 @@ local function send_loop()
   engine.loop(params:get('aur_loop') == 1 and 1 or 0, a, b)
 end
 
--- K3: set loop in, then loop out (which starts the loop); K3 again ends it
-function Tape.loop_key()
-  if params:get('aur_loop') == 1 then
-    params:set('aur_loop', 0)
-  elseif st.pending_in == nil then
-    st.pending_in = st.pos
-  else
-    local a, b = st.pending_in, st.pos
-    st.pending_in = nil
-    if a > b then a, b = b, a end
-    if b - a < 0.05 then return end
-    params:set('aur_loop_in', a)
-    params:set('aur_loop_out', b)
-    params:set('aur_loop', 1)
-  end
-  Tape.dirty = true
-end
-
-function Tape.loop_cancel()
-  st.pending_in = nil
-  Tape.dirty = true
+-- loop between a and b (a region, K1+K2)
+function Tape.loop(a, b)
+  params:set('aur_loop_in', a)
+  params:set('aur_loop_out', b)
+  params:set('aur_loop', 1)
 end
 
 ---- analysis and proxies
@@ -214,6 +208,11 @@ end
 
 ---- files
 
+-- Tape.on_open(path, dur) is called before the switch (st still holds the
+-- old tape) and returns the start position when `start` is nil
+Tape.on_open = nil
+Tape.hold_open = false -- true: the aur_file action doesn't open (startup)
+
 function Tape.open(path, start)
   if path == nil or path == '' or path:sub(-1) == '/' or not util.file_exists(path) then return false end
   local ch, samples, rate = audio.file_info(path)
@@ -221,17 +220,19 @@ function Tape.open(path, start)
     print('aurotate: not a sound file: ' .. path)
     return false
   end
+  local from_doc = Tape.on_open and Tape.on_open(path, samples / rate)
+  start = start or from_doc or 0
   st.path = path
   st.name = path:match('[^/]*$'):gsub('%.%w+$', '')
   st.dur = samples / rate
   st.ch = ch
-  st.pos = start or 0
+  st.pos = start
   st.pending_in = nil
   st.jogging = false
   st.peaks = nil
   st.proxies = 0
   params:set('aur_shuttle', 0, true)
-  engine.open(path, start or 0, params:get('aur_ring'))
+  engine.open(path, start, params:get('aur_ring'))
   send_loop()
   peaks_loaded = 0
   Analysis.start(path, samples, analysed, analysing)
@@ -250,11 +251,12 @@ local function fmt_time(p) return Tape.hms(p:get(), true) end
 
 function Tape.add_params()
   local pi3 = mem_total_mb() < 1500
-  params:add_group('aur_tape', 'TAPE', 20)
+  params:add_group('aur_tape', 'TAPE', 22)
 
   params:add_file('aur_file', 'tape', _path.audio)
   params:set_action('aur_file', function(path)
-    if path ~= st.path then Tape.open(path, 0) end
+    if Tape.hold_open then return end -- startup decides (see init)
+    if path ~= st.path then Tape.open(path) end
   end)
 
   params:add_trigger('aur_play', 'play / stop')
@@ -281,11 +283,10 @@ function Tape.add_params()
   params:add_control('aur_jog_stop', 'scrub stop time', cs.new(0.05, 3, 'exp', 0, 0.5, 's'))
   params:set_action('aur_jog_stop', function(x) engine.jog_stop(x) end)
 
-  params:add_separator('aur_sep_loop', 'loop (K3)')
+  params:add_separator('aur_sep_loop', 'loop (K1+K2)')
   params:add_binary('aur_loop', 'loop', 'toggle', 0)
   params:set_action('aur_loop', function(v)
     if v == 1 then
-      st.pending_in = nil
       local a, b = params:get('aur_loop_in'), params:get('aur_loop_out')
       if a > b then a, b = b, a end
       -- a loop is entered by crossing its edge; start inside it
@@ -298,6 +299,9 @@ function Tape.add_params()
   params:set_action('aur_loop_in', send_loop)
   params:add_control('aur_loop_out', 'loop out', time_spec(), fmt_time)
   params:set_action('aur_loop_out', send_loop)
+
+  params:add_separator('aur_sep_notes', 'transcription')
+  params:add_control('aur_rewind', 'resume rewind (Esc)', cs.new(0, 10, 'lin', 0.5, 2, 's'))
 
   params:add_separator('aur_sep_mem', 'memory')
   params:add_number('aur_ring', 'ring window', 16, 600, pi3 and 64 or 120, function(p) return p:get() .. ' s' end)
