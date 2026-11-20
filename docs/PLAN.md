@@ -606,8 +606,11 @@ Decisions made while building it (see also §8):
   private (`private` is meant for §4.7's "notes marked private").
 
 **Open after phase 4:**
-- **Hands-on on the device** (K3 hold timing, popup reading, USB keyboard
-  typing with a real keyboard and a Finnish layout).
+- **Hands-on on the device** (2026-11-20): "very good for a first version".
+  Wanted next for the keyboard (in `docs/IDEAS.md`): Up/Down to jump between
+  marks, Left/Right to cue with Shift/Ctrl for speed, Space for play/stop.
+  These collide with the editor's cursor keys and typing; decide how before
+  building.
 - **Xruns while analysing a 3 h stereo WAV** (phase 2 issue, found now):
   one analysis job of `test3h.wav` gave ~50 xruns a minute ("SuperCollider
   was not finished"), during 1× play and idle alike; field_L (mono FLAC)
