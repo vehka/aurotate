@@ -435,7 +435,7 @@ function V.redraw(Tape, page, pages, doc, here)
   local name, nlev, nfont = st.name, 4, false
   if here then name, nlev, nfont = here.label ~= '' and here.label or here.id, 12, here.label ~= '' end
   Draw.header(page, pages, name, state, slev,
-    st.path and Tape.hms(st.pos, true) or nil, nlev, nfont)
+    st.path and Tape.clock(st.pos, true) or nil, nlev, nfont)
   if not st.path then
     screen.level(4)
     screen.move(64, 34)

@@ -240,6 +240,156 @@ function T.run(dir)
   local smd = Export.markdown(s, { now = 0 })
   check('md sound', smd:find('sound: dry 0%, send a 100%, gain +3.0 dB, pan R 100', 1, true) ~= nil)
 
+  -- phase 8: bext, wall clock, reels, joins, the collection
+  local Bext = include 'lib/bext'
+  local Wall = include 'lib/wallclock'
+  local Reel = include 'lib/reel'
+  local Collection = include 'lib/collection'
+  local function u32(n) return string.pack('<I4', n) end
+  -- a WAV with chunks: fmt, (bext), (junk), data of `frames` frames
+  local function wav(path, o)
+    local ch, rate = o.ch or 1, o.rate or 48000
+    local chunks = {}
+    chunks[#chunks + 1] = 'fmt ' .. u32(16) .. string.pack('<I2I2I4I4I2I2', 1, ch, rate, rate * ch * 2, ch * 2, 16)
+    if o.junk then chunks[#chunks + 1] = 'JUNK' .. u32(3) .. 'abc\0' end
+    if o.date then
+      local b = string.rep('\0', 256) .. ('zoom' .. string.rep('\0', 28)) .. string.rep('\0', 32)
+        .. o.date .. o.time .. string.pack('<I4I4', (o.tr or 0) % 4294967296, (o.tr or 0) // 4294967296)
+        .. string.rep('\0', 602 - 346)
+      chunks[#chunks + 1] = 'bext' .. u32(#b) .. b
+    end
+    local data = string.rep('\0', (o.frames or 10) * ch * 2)
+    chunks[#chunks + 1] = 'data' .. u32(#data) .. data
+    local body = 'WAVE' .. table.concat(chunks)
+    local f = io.open(path, 'wb')
+    f:write('RIFF' .. u32(#body) .. body)
+    f:close()
+  end
+  os.execute("mkdir -p '" .. dir .. "rec'")
+  local rec = dir .. 'rec/'
+  wav(rec .. 'ZOOM0001.WAV', { date = '2025-08-03', time = '23:59:00', tr = 86340 * 48000, frames = 960, junk = true })
+  wav(rec .. 'ZOOM0001_0001.WAV', { date = '2025-08-04', time = '00:00:00', tr = 86340 * 48000 + 960, frames = 480 })
+  wav(rec .. 'ZOOM0001_0002.WAV', { date = '2025-08-04', time = '00:00:00', tr = 1, frames = 480 }) -- a gap
+  wav(rec .. 'ZOOM0002.WAV', { ch = 2, frames = 100 })
+  wav(rec .. 'plain.wav', { frames = 10 })
+  local b = Bext.read(rec .. 'ZOOM0001.WAV')
+  check('bext read', b and b.date == '2025-08-03' and b.time == '23:59:00' and b.rate == 48000 and b.frames == 960
+    and b.originator == 'zoom', b and (tostring(b.date) .. ' ' .. tostring(b.frames)))
+  check('bext none', Bext.read(rec .. 'plain.wav') == nil)
+  check('bext not wav', Bext.read(dir .. 'tags.lua') == nil)
+  local o = Bext.origin(b)
+  check('bext origin', o and o.date == '2025-08-03' and o.secs == 86340 and o.source == 'bext', o and o.secs)
+  check('bext origin bad time_ref', Bext.origin({ date = '2025-01-01', time = '10:00:00', time_ref = 5, rate = 48000 }).secs == 36000)
+  -- wall clock
+  local w = Wall.parse('2025-08-03 14:32:07')
+  check('wall parse', w and w.secs == 14 * 3600 + 32 * 60 + 7 and w.source == 'manual')
+  check('wall parse short', Wall.parse('2025-8-3 9:05').secs == 9 * 3600 + 300)
+  check('wall parse bad', Wall.parse('2025-02-30 10:00') == nil and Wall.parse('nope') == nil and Wall.parse('2025-01-01 24:00') == nil)
+  check('wall time', Wall.time(w, 60.25, true) == '14:33:07.2', Wall.time(w, 60.25, true))
+  check('wall midnight', Wall.stamp(o, 90) == '2025-08-04 00:00:30', Wall.stamp(o, 90))
+  check('wall shift back', Wall.stamp(Wall.shift(Wall.parse('2025-03-01 00:00:30'), -60)) == '2025-02-28 23:59:30')
+  check('wall date label', Wall.date_label(w) == '3 Aug 2025')
+  check('wall clean', Wall.clean({ date = '2025-13-01', secs = 1 }) == nil and Wall.clean(w).secs == w.secs)
+  local wd = Model.new('/x/w.wav', 10, 1)
+  wd.tape.origin = w
+  local wb = Model.validate(load(Store.serialise(wd), 'w', 't', {})())
+  check('origin round trip', wb.tape.origin and wb.tape.origin.secs == w.secs and wb.tape.origin.date == w.date)
+  -- reels
+  local function info(p)
+    local bb = Bext.read(p)
+    if bb then return bb.channels, bb.frames, bb.rate end
+    local f = io.open(p, 'rb')
+    if not f then return 0, 0, 0 end
+    local h = f:read(44)
+    f:close()
+    local ch, rate = string.unpack('<I2I4', h, 23)
+    return ch, string.unpack('<I4', h, 41) // (ch * 2), rate
+  end
+  local function ls(d)
+    local out = {}
+    local pipe = io.popen("ls -p '" .. d .. "'")
+    for n in pipe:lines() do out[#out + 1] = n end
+    pipe:close()
+    return out
+  end
+  check('reel parse', table.concat(Reel.parse('# c\n a.wav \n\n/abs/b.wav\r\n', '/d/'), ',') == '/d/a.wav,/abs/b.wav')
+  local cands, confirmed = Reel.candidates(rec .. 'ZOOM0001.WAV', ls, info)
+  check('reel candidates', #cands == 3 and confirmed == 1 and cands[2].continuous == true and cands[3].continuous == false,
+    #cands .. ' ' .. confirmed)
+  check('reel continues midnight', Reel.continues({ time_ref = 86400 * 48000 - 100, rate = 48000 }, { time_ref = 5 }, 105))
+  local rp = Reel.new_path(rec .. 'ZOOM0001.WAV', function(p) return p == rec .. 'ZOOM0001.reel' end)
+  check('reel new path', rp == rec .. 'ZOOM0001-2.reel', rp)
+  local f = io.open(rec .. 'Z.reel', 'w')
+  f:write(Reel.text({ rec .. 'ZOOM0001.WAV', rec .. 'ZOOM0001_0001.WAV' }, rec))
+  f:close()
+  local reel = Reel.load(rec .. 'Z.reel', info)
+  check('reel load', reel and reel.frames == 1440 and #reel.parts == 2 and reel.parts[2].start == 960 and reel.rate == 48000)
+  f = io.open(rec .. 'bad.reel', 'w')
+  f:write('ZOOM0001.WAV\nZOOM0002.WAV\nmissing.wav\n')
+  f:close()
+  local nr, why = Reel.load(rec .. 'bad.reel', info)
+  check('reel mixed formats', nr == nil and why:find('part 2 differs', 1, true), why)
+  -- joining notes: part 2's notes land after part 1
+  local big1 = Model.new('/x/a.wav', 100, 1)
+  Model.add_mark(big1, 5)
+  local big2 = Model.new('/x/b.wav', 100, 1)
+  local rr = Model.add_region(big2, 1, 2)
+  Model.set_snd(big2, rr, 'gain', -6)
+  Model.add_mark(big2, 3)
+  local jj = Model.new('/x/ab.reel', 200, 1)
+  Model.append(jj, big1, 0)
+  Model.append(jj, big2, 100)
+  check('append offsets', #jj.marks == 2 and jj.marks[2].t == 103 and jj.regions[1].t0 == 101
+    and jj.regions[1].snd.gain == -6 and jj.regions[1].snd ~= rr.snd)
+  check('append ids', jj.marks[1].id == 'm1' and jj.regions[1].id == 'r3' and jj.next_id == 4,
+    jj.marks[1].id .. jj.regions[1].id .. jj.next_id)
+  -- the collection index
+  Collection.init(dir, Store)
+  Store.put('/x/old.wav', (function()
+    local od = Model.new('/x/old.wav', 50, 7)
+    Model.add_mark(od, 3)
+    return od
+  end)())
+  local entries = Collection.load(function() return Store.all_docs(ls) end)
+  local found_old = Collection.find('/x/old.wav')
+  local n_boot = #entries
+  check('collection bootstrap', found_old and found_old.marks == 1 and found_old.dur == 50, #entries)
+  Collection.update('/x/new.wav', { dur = 10, opened = 5 })
+  Collection.update('/x/old.wav', { opened = 9 })
+  Collection.save()
+  Collection.init(dir, Store)
+  check('collection reload', Collection.find('/x/new.wav') ~= nil and #Collection.entries() == n_boot + 1)
+  local sorted = Collection.sorted('recent')
+  check('collection recent', sorted[1].path == '/x/old.wav', sorted[1].path)
+  check('collection name', Collection.sorted('name')[1].path == '/x/new.wav')
+  Collection.rename('/x/old.wav', '/y/old.wav')
+  check('collection rename', Collection.find('/y/old.wav') and not Collection.find('/x/old.wav'))
+  check('store move', Store.move('/x/old.wav', '/y/old.wav') and Store.peek('/y/old.wav') ~= nil
+    and Store.peek('/x/old.wav') == nil)
+  -- the overview strip reads only the coarsest level
+  local pk = dir .. 'p.peaks'
+  local n0, n1, n2 = 512, 32, 4
+  local recs = {}
+  for i = 1, n0 + n1 do recs[i] = string.char(0, 0, 0, 0) end
+  for i = 1, n2 do recs[#recs + 1] = string.char(0, 0, i == 1 and 50 or 100, 0) end
+  f = io.open(pk, 'wb')
+  f:write('AURPK2\0\0' .. string.pack('<I4I4I4I4I8I4I4', 960, 48000, 1, n0, n0 * 960, n1, n2) .. table.concat(recs))
+  f:close()
+  local strip = Collection.strip(pk, 4)
+  check('strip coarse level', strip and #strip == 4 and math.abs(strip[1] - 0.5) < 1e-9 and strip[4] == 1,
+    strip and table.concat(strip, ','))
+  local strip2 = Collection.strip(pk, 8) -- wider than level 2: level 1 (all zero)
+  check('strip finer level', strip2 and strip2[1] == 0)
+  -- export with a start time
+  local ed = Model.new('/x/talk.wav', 4000, 1)
+  ed.tape.origin = Wall.parse('2025-08-03 14:00:00')
+  Model.add_mark(ed, 100)
+  local emd = Export.markdown(ed, { now = 0, parts = { '/x/a.wav', '/x/b.wav' } })
+  check('md wall heading', emd:find('## 0:01:40 (14:01:40)', 1, true) ~= nil)
+  check('md recorded', emd:find('- recorded: 2025-08-03 14:00:00 – 2025-08-03 15:06:40 (set by hand)', 1, true) ~= nil)
+  check('md parts', emd:find('  - part 2: `/x/b.wav`', 1, true) ~= nil)
+  check('md wall meta', emd:find('mark 0:01:40.000 · 2025-08-03 14:01:40', 1, true) ~= nil)
+
   print(string.format('model_test: %d passed, %d failed', passes, fails))
   if fails == 0 then rm_rf(dir) end
   return fails

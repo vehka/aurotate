@@ -179,8 +179,13 @@ local function title(left, right)
   screen.stroke()
 end
 
+-- the frame and title, for the collection's tape popup (lib/ui/tape_popup.lua)
+P.frame_box, P.title, P.ui_font = frame_box, title, ui_font
+P.GEOM = { X = X, Y = Y, W = W, H = H, TX = TX, TW = TW, ROWS_Y = ROWS_Y, ROW_H = ROW_H, NROWS = NROWS }
+
+-- times on the item's rows follow the header's clock (offset or time of day)
 local function hms(s)
-  return Tape.hms(s, true)
+  return Tape.clock(s, true)
 end
 
 local function item_rows(item)

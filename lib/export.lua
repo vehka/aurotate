@@ -18,6 +18,7 @@
 
 local Model = include 'lib/model'
 local Sound = include 'lib/sound'
+local Wall = include 'lib/wallclock'
 
 local Export = {}
 
@@ -126,8 +127,14 @@ function Export.markdown(doc, opts)
   local title = one_line(tape.title ~= '' and tape.title or (tape.path or ''):match('[^/]*$') or 'tape')
   add('# ' .. title)
   add('')
+  local origin = Wall.clean(tape.origin)
   if tape.path then add('- file: `' .. tape.path .. '`') end
+  for i, p in ipairs(opts.parts or {}) do add(string.format('  - part %d: `%s`', i, p)) end
   if tape.dur then add('- length: ' .. Export.tc(tape.dur, long)) end
+  if origin then
+    add('- recorded: ' .. Wall.stamp(origin) .. ' – ' .. Wall.stamp(origin, tape.dur or 0)
+      .. (origin.source == 'bext' and ' (from the file\'s bext chunk)' or ' (set by hand)'))
+  end
   add(string.format('- %d %s, %d %s', #doc.marks, #doc.marks == 1 and 'mark' or 'marks',
     #doc.regions, #doc.regions == 1 and 'region' or 'regions'))
   local tags = Model.tags(doc)
@@ -139,8 +146,14 @@ function Export.markdown(doc, opts)
   add('- exported: ' .. os.date('%Y-%m-%d %H:%M', opts.now or os.time()) .. ' (aurotate)')
   add('')
   add('<!-- aur:tape ' .. (opts.id or '') .. ' -->')
-  add('<!-- Times are offsets into the file. Each section is matched to the tape by')
-  add('     the aur comment under its heading; keep those lines as they are. -->')
+  if origin then
+    add('<!-- Times are offsets into the file, with the time of day in brackets. Each')
+    add('     section is matched to the tape by the aur comment under its heading;')
+    add('     keep those lines as they are. -->')
+  else
+    add('<!-- Times are offsets into the file. Each section is matched to the tape by')
+    add('     the aur comment under its heading; keep those lines as they are. -->')
+  end
 
   if #items == 0 then
     add('')
@@ -153,11 +166,15 @@ function Export.markdown(doc, opts)
     local head
     if Model.is_region(item) then
       head = Export.tc(item.t0, long) .. '–' .. Export.tc(item.t1, long)
+      if origin then head = head .. ' (' .. Wall.time(origin, item.t0) .. ')' end
       meta[#meta + 1] = string.format('region %s–%s (%s)', Export.tc(item.t0, long, true),
         Export.tc(item.t1, long, true), Export.tc(item.t1 - item.t0, false, false))
+      if origin then meta[#meta + 1] = Wall.stamp(origin, item.t0) .. '–' .. Wall.time(origin, item.t1) end
     else
       head = Export.tc(item.t, long)
+      if origin then head = head .. ' (' .. Wall.time(origin, item.t) .. ')' end
       meta[#meta + 1] = 'mark ' .. Export.tc(item.t, long, true)
+      if origin then meta[#meta + 1] = Wall.stamp(origin, item.t) end
     end
     local p = Export.parent(doc, item)
     if p then meta[#meta + 1] = 'in ' .. (name(p) and (name(p) .. ' (`' .. p.id .. '`)') or ('`' .. p.id .. '`')) end
@@ -188,11 +205,11 @@ end
 
 -- write the export for `doc` under `dir` (the data dir, trailing slash).
 -- Returns the path written, or nil and an error.
-function Export.write(doc, dir, id, write_file, now)
+function Export.write(doc, dir, id, write_file, now, parts)
   local out = dir .. 'exports/' .. id .. '/'
   os.execute("mkdir -p '" .. out:gsub("'", "'\\''") .. "'")
   local path = out .. 'notes.md'
-  local ok, err = write_file(path, Export.markdown(doc, { now = now, id = id }))
+  local ok, err = write_file(path, Export.markdown(doc, { now = now, id = id, parts = parts }))
   if not ok then return nil, err end
   return path
 end

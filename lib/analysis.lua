@@ -43,8 +43,11 @@ local function read_kv(path)
   return t
 end
 
-function Analysis.cache_dir(path)
-  local stat = util.os_capture('stat -L -c "%s %Y" ' .. q(path)) or ''
+-- `parts`: a reel's files (lib/reel.lua); their sizes and times count too
+function Analysis.cache_dir(path, parts)
+  local files = q(path)
+  for _, p in ipairs(parts or {}) do files = files .. ' ' .. q(p) end
+  local stat = util.os_capture('stat -L -c "%s %Y" ' .. files) or ''
   local base = path:match('[^/]*$'):gsub('%.%w+$', ''):gsub('[^%w%-_]', '_'):sub(1, 40)
   return norns.state.data .. 'cache/' .. base .. '-' .. fnv(path .. '|' .. stat) .. '/'
 end
@@ -70,10 +73,11 @@ end
 
 -- analyse `path` (`frames` long, for the progress) unless its cache is
 -- complete; on_done(dir, info) runs when the cache is ready, on_progress(dir)
--- (optional) about once a second while the pass runs
-function Analysis.start(path, frames, on_done, on_progress)
+-- (optional) about once a second while the pass runs. `parts`: the files of
+-- a reel (path is then the reel file)
+function Analysis.start(path, frames, on_done, on_progress, parts)
   Analysis.stop()
-  local dir = Analysis.cache_dir(path)
+  local dir = Analysis.cache_dir(path, parts)
   st.dir, st.info, st.err, st.progress = dir, nil, nil, 0
   if util.file_exists(dir .. 'done') then
     st.info = read_kv(dir .. 'info')
@@ -84,9 +88,11 @@ function Analysis.start(path, frames, on_done, on_progress)
   kill_job(dir) -- a job left over from a crash
   local script = norns.state.path .. 'tools/analyze.sh'
   local bin = norns.state.data .. 'bin/aurpeaks'
+  local ins = {}
+  for i, p in ipairs(parts or { path }) do ins[i] = q(p) end
   os.execute(string.format(
     'setsid nice -n 10 ionice -c 2 -n 7 bash %s %s %s %s > /dev/null 2>&1 < /dev/null &',
-    q(script), q(path), q(dir), q(bin)))
+    q(script), q(dir), q(bin), table.concat(ins, ' ')))
   st.state = 'running'
   running_dir = dir
   local t0 = util.time()

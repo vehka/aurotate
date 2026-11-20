@@ -1,4 +1,4 @@
-# aurotate: implementation plan (draft 8, phase 6 built)
+# aurotate: implementation plan (draft 9, phase 8 built; phase 7 deferred)
 
 An audio-anthropology workbench for norns: play recordings hours long on an
 analog-feeling tape, mark points and regions, attach notes and per-region
@@ -168,7 +168,52 @@ above the speed where a proxy takes over (11.3× with P1, 90× with P2 only).
   Each has its own small ring (e.g. 20 s) and the same Feeder logic. For
   instant attack, cache the first 3 s of every MIDI-mapped region at full
   resolution. Until its ring catches up, a voice reads from that cache and
-  falls back to the proxy if it has to.
+  falls back to the proxy if it has to. *Superseded by the AurVoice plan
+  below (2026-11-20).*
+- **Region voices, revised plan (2026-11-20; phase 7 deferred):** not a
+  second AurTape per voice. Three reasons, from the phase 6 code:
+  - AurTape allocates its proxies per instance (`prApplyProxy`); P1 for a
+    2 h tape is 83 MB, so copies per voice don't fit the shield. Shared
+    proxies would be a refactor of their own.
+  - The AurTape synth is transport machinery (3 PlayBufs, proxy crossfades
+    and LPFs, lifter cue, jog, loop seams). A triggered region needs almost
+    none of it, and 4 more copies on a Pi 3 risk the CPU budget (§9.3).
+  - 5 independent streams seeking on an SD card share one NRT queue; each
+    feeder keeps one read in flight, so the voices delay each other's chunks.
+
+  Instead a light **`AurVoice`** class (`lib/sc/AurVoice.sc`), two modes:
+  1. **Resident** (build first, maybe the only mode): when a region is
+     MIDI-mapped, read just its range into its own Buffer (`b_read` with
+     offset + length; split at reel part boundaries, §6.1). The voice is a
+     PlayBuf over it: instant attack, loop inside the region and reverse for
+     free, any `rate` (a MIDI note may set pitch), nothing streams while it
+     plays. Region length is capped by a budget param, e.g. shield 16 × 10 s
+     stereo ≈ 61 MB; most triggered material (a phrase, a word, an event)
+     fits.
+  2. **Streamed** (long regions; later, if ever): SC's `cueSoundFile` +
+     `VDiskIn` pattern. The cued buffer *is* the head cache (instant
+     attack), then it streams. Forward only; loop / retrigger need a second
+     cued buffer to swap to. Until then a long region plays its first N s
+     resident.
+
+  Each voice has its own `AurOut`, fed from the voice's position bus, so a
+  region's sound (and nested regions inside it) applies the same way as on
+  the transport. Move the segment partition up to the engine and share it
+  (now per AurOut). Add `rate` (product, §3) to `lib/sound.lua`. Voices:
+  2 on the shield, 4 on the Pi 4. Softcut was considered and rejected for
+  this: its output bypasses AurOut (a second implementation of region sound,
+  fx sends per voice unverified), voices are mono (a stereo voice takes two
+  of six), 349 s of buffer shared with other mods, no resampling on read.
+  It may suit the "audio notes" idea (IDEAS.md) instead.
+
+  **Open design questions** (decide before building):
+  - Trigger modes: one-shot / gate / loop, or all three? Does the MIDI note
+    set pitch (`rate`), or only choose the region?
+  - The transport while a voice plays: independent, ducked, or paused?
+  - Polyphony: may the same region play twice at once? Choke groups?
+  - UI: voice playheads on the tape view; MIDI learn from the region popup.
+  - Priority: voices are for performance; for the ethnographer workflow,
+    the keyboard items and region LFOs in IDEAS.md may matter more.
 - Each voice has an output stage: `gain · pan · tone (tilt EQ) → dry → main bus`,
   `→ sendA`, `→ sendB`.
   - **"send-as-insert"** = dry 0, send 1, with the fx send return set to
@@ -298,6 +343,33 @@ A list of tapes, with duration, number of notes, last position and a small
 overview strip for each. A virtual tape can be made of **several files
 joined** (§6.1).
 
+✅ Built (2026-11-20, `lib/ui/collection.lua`, `lib/ui/tape_popup.lua`,
+`lib/collection.lua`, `lib/shelf.lua`):
+- **The index** `dust/data/aurotate/collection.lua`: one entry per tape ever
+  opened (path, title, dur, opened, marks/regions counts, last_pos, size,
+  analysis cache dir, parts, origin). A summary, updated when a tape opens
+  (`Tape.on_opened` → `Annot.opened`) and when it is left (`Annot.leave`);
+  the tape documents stay the truth. The first run builds it from the
+  documents in `tapes/`.
+- **Page:** 5 rows (tom-thumb): a bar for the open tape, ≡ for a reel, title
+  (`? ` and dim when missing), a dot when it has notes, length. The last row
+  is `+ add a tape` (fileselect). Below a rule: the selected tape's overview
+  (rms of the coarsest peaks level, read from the cache's peaks file: only
+  that level, a few KB; `Collection.strip`) with a level-15 tick at the last
+  position (the playhead for the open tape), and a line: notes, date and
+  start time. Details are looked up when shown and cached 10 s. E2 select,
+  E3 sort (recent / name / length), K2 play/stop, K3 open and go to the
+  tape page, K1+K3 tape popup. USB keyboard: Up/Down/PgUp/PgDn/Home/End,
+  Enter open, Esc play/stop.
+- **Tape popup:** file, length, *start* (E3 ±1 min, K1+E3 ±1 h, K3
+  textentry with a check; empty = back to bext; first guess = file mtime −
+  length; title says FROM FILE / BY HAND), *join* (single files: E3 how
+  many of the next files, `ok` when bext confirms all; title shows the last
+  file joined; K3 twice), *relink* (missing tapes: K3 search, E3 pick, K3
+  twice), *forget* (K3 twice). A changed start is written when the popup
+  closes or the row changes (the open tape: `Annot.set_origin`, debounced
+  by the store; another tape: `Store.peek` / `Store.put`).
+
 ### 4.3 Regions/annotations list
 - A list of marks and regions sorted by time. Each shows a timecode, its
   label, a ♪ if it has sound settings and a MIDI note if mapped. K3 jumps the
@@ -376,7 +448,7 @@ wall-clock), MIDI channel and mapping mode, and export.
 ## 5. Export / import (lib/export.lua)
 Write to `_path.data/aurotate/exports/<tape>/`:
 - `notes.md` ✅ (2026-11-20): one section per mark/region, with timecode
-  (offset; wall-clock in phase 8), label, tags and note. Phase 5b: **re-import** edits to the
+  (offset; the time of day too when the start is known, ✅ phase 8), label, tags and note. Phase 5b: **re-import** edits to the
   notes from this file, matched by id comment `<!-- aur:r12 -->`. Format, as
   built:
   ```
@@ -403,8 +475,37 @@ Write to `_path.data/aurotate/exports/<tape>/`:
    Sound Devices). A virtual tape that spans the parts as one continuous
    tape. The Feeder maps file frames to (part, offset). This is the most
    practically useful item on the list.
+   ✅ Built (phase 8): a `.reel` text file next to the parts (one name per
+   line, relative; `#` comments), `lib/reel.lua`. Its path is the tape's
+   identity (document, cache, PSET, last tape). Lua sends `reel_clear n`,
+   `reel_part s` × n, `open_reel s f f n`; `AurTape` keeps `parts`
+   ([path, first frame, frames]) and splits a chunk read at part boundaries
+   (`prPieces`: one `b_readChannel` per part, the last carries the valid
+   flags; the read completes when every piece is done or failed). All parts
+   must share rate and channels (checked in Lua and sclang). The analysis
+   gets every part (`analyze.sh <dir> <bin> <file>...`; sox concatenates),
+   so peaks and proxies cover the reel; the cache hash includes every
+   part's size and mtime. **Join** is offered, never automatic: candidates
+   are the files after the chosen one in its folder (by name) with the same
+   format, and bext `time_ref` continuity (`t2 = t1 + frames1`, ±2 samples,
+   across midnight) marks the ones that really continue it. Joining writes
+   `<first>.reel`, appends each part's notes at its offset with new ids
+   (`Model.append`), takes part 1's position and a hand-set start, and
+   replaces the parts' collection entries with the reel. Opening a single
+   file that the next one continues shows `PART OF n: JOIN IN COLLECTION`.
 2. **Wall-clock time** from BWF `bext` (§4.1); notes export with the real
    time of day.
+   ✅ Built (phase 8): `lib/bext.lua` reads the chunk headers (RIFF and
+   RF64; fmt, bext, ds64, data), `lib/wallclock.lua` does dates and times
+   (pure Lua, across midnight). `doc.tape.origin = { date, secs, source }`.
+   bext `time_ref` wins over the origination time when it is set and
+   agrees with it within a minute (some recorders run free timecode).
+   A bext origin is taken from the file on every open (not saved by itself);
+   a manual one wins and is saved. PARAMS > TAPE > *clock* (offset / time of
+   day) switches the header, the regions list and the item popup times.
+   `notes.md` gives the time of day in each heading and `date time` in the
+   metadata line, plus a `recorded:` line (and a reel's parts) in the header.
+   No bext in FLAC (yet): set the start by hand.
 3. **Transcription mode:** auto-rewind on resume, slowing down without
    changing pitch (granular `Warp1`/`GrainBuf` on the ring buffer),
    keyboard hotkeys.
@@ -440,8 +541,8 @@ Write to `_path.data/aurotate/exports/<tape>/`:
 | 4 | ✅ **Marks, regions, notes** (2026-11-20, Pi 3; see §9.1): model + tape document store, K3 tap/hold gestures, region bands and mark flags, item popup and note editor, USB keyboard notes and hotkeys | done: annotations survive a script reload, a reboot and PSET switches between two tapes (each with its own notes and position); off-device and on-device store tests pass. Hands-on on the device still to do |
 | 5 | ✅ Regions list + reader popup (2026-11-20); exports: ✅ md, Audacity / VTT / CSV still to do; excerpts still to do | export opens correctly in Audacity and a VTT player |
 | 6 | ✅ **Per-region sound** (2026-11-20, Pi 3; see §9.1): output stage, fx v2 sends, send-as-insert, boundary glides, current-region params | done: `sound_test()` levels exact (−12 dB, mute, hard pan, nested +6 dB) and no clicks at boundaries, loop wraps or jumps; sends fall back to a private bus without fx. Hands-on (by ear, an effect in a send) still to do |
-| 7 | Region voices + MIDI triggers (note→region mapping and learn, choke groups, one-shot/gate/loop modes) | 4-voice polyphony from MIDI with instant attack |
-| 8 | Collection view, split-file reels, wall-clock time | — |
+| 7 | Region voices + MIDI triggers (note→region mapping and learn, choke groups, one-shot/gate/loop modes). *Deferred (2026-11-20); plan in §2.4* | 4-voice polyphony from MIDI with instant attack |
+| 8 | ✅ **Collection view, split-file reels, wall-clock time** (2026-11-20, Pi 3; see §9.1) | done: a sine split into 3 WAV parts plays across every boundary without a phase jump (forward, reverse, 2×, seek next to it, loop over it); a stereo FLAC reel passes the transport test; join, relink and the start time work from the UI; export has the time of day. Hands-on still to do |
 | 9 | Grid; aurotate's own effects (voice transformation) in the per-voice insert slot | — |
 
 Suggested layout:
@@ -475,10 +576,22 @@ lib/ui/regions.lua  settings.lua  popup.lua
   folders don't share notes, and editing the audio (mtime, size) doesn't lose
   them. Moving the file does (phase 8 can relink by name + size).
 - USB keyboard hotkeys are F6–F9 (core owns F1–F5).
+- Reels are `.reel` text files **next to the parts** in `dust/audio`, not in
+  the data dir: they move with the folder, can be written or fixed by hand
+  over SMB, and fileselect / the `aur_file` param open them like any tape.
+- Joining split files is always the user's choice (the collection's tape
+  popup); bext continuity only marks candidates `ok`. Name patterns alone
+  can't tell a split take from the next take (Zoom `ZOOM0001` / `ZOOM0002`).
+- The parts' own documents and analysis caches are kept after a join
+  (nothing is deleted); the reel gets copies of their notes.
+- The collection lists tapes that were opened (an index), not everything
+  under `dust/audio`.
+- A tape's start (the wall clock) comes from bext unless set by hand; a
+  hand-set one wins and survives reopening.
 
 ## 9. Development notes (read this first in a new session)
 
-### 9.1 State of the code after phase 4
+### 9.1 State of the code (phases 1–8)
 | file | status |
 |---|---|
 | `lib/model.lua` | Phase 4. The document (§3, without `snd`/`midi` yet): `marks` sorted by `t`, `regions` by `t0`, ids `m<n>`/`r<n>` from one `next_id`, times rounded to 1 ms. Queries: `innermost`, `regions_at` (outermost first, for §3's mixing), `mark_near`, `at` (a mark within tolerance wins over the region it sits in). Every change goes through it and calls `Model.changed`. `validate` runs migrations (`Model.migrations[v]`, none yet), drops malformed items and counts them, keeps `next_id` above every id. Pure Lua, no norns calls |
@@ -502,7 +615,13 @@ lib/ui/regions.lua  settings.lua  popup.lua
 | `test/sound.lua`, `tools/sound_check.py` | Phase 6. `sound_test()` records a sine (sine440.wav) through five test regions (removed afterwards), a loop over a boundary, jumps and FF 8×, with reverb and monitor off for the run; the script checks levels per region and lists second-difference spikes |
 | `test/model_test.lua` | Phase 6: + sound (76 checks in all). Phase 5: + export (61 checks in all). Phase 4: model + store (44 checks: ordering, queries, edge clamps, round trip incl. quotes/newlines/UTF-8, `.bak`, corrupt → `.bak`, newer → read-only and untouched, malformed items dropped, no file for an empty tape, palette, ids). `lua5.3 test/model_test.lua` off the device, `notes_test()` on it |
 | `test/transport.lua` | Phase 1 sections (idle, 1×, seeks, FF 2–64×, REW, scrub, loops, parking) plus `analysis` (drops the cache, plays 1× through a fresh analysis) and `cue` (FF/REW 8–256×, far seeks with focus); option `proxy_mb`. Not in the default run. Lines now include `mem_avail_mb`, `covers`, `proxy_max`, `p1`, `p2` (proxy state at the end of the phase) |
-| `tools/aurpeaks.c`, `tools/analyze.sh` | The analysis pass (§2.3) |
+| `tools/aurpeaks.c`, `tools/analyze.sh` | The analysis pass (§2.3). Phase 8: `analyze.sh <cache dir> <aurpeaks> <file>...` (a reel's parts, concatenated by sox) |
+| `lib/bext.lua`, `lib/wallclock.lua` | Phase 8. BWF bext reader (RIFF/RF64 headers only) and `Bext.origin`; dates/times from an origin (`parse`, `clean`, `shift`, `at`, `time`, `stamp`, `date_label`). Pure |
+| `lib/reel.lua` | Phase 8. `.reel` files: `parse`, `text`, `load(path, info)` (parts with start frames, format check), `continues` (bext time_ref), `candidates(path, list, info, bext)`, `new_path`. Pure (file info and listings passed in) |
+| `lib/collection.lua` | Phase 8. The index (`collection.lua` in the data dir): `load` (bootstraps from `Store.all_docs`), `update`, `from_doc`, `rename`, `remove`, `sorted`, debounced `tick`/`flush`; `strip(peaks, n)` reads only the coarsest peaks level |
+| `lib/shelf.lua` | Phase 8. Glue for the collection: `missing`, `candidates`, `join` (writes the reel, carries notes with `Model.append`, swaps the index entries, reopens if a part was open), `find_moved` (`find` under dust/audio by name + size), `relink` (`Store.move` + renames the analysis cache), `forget`, `split_hint` |
+| `lib/ui/collection.lua`, `lib/ui/tape_popup.lua` | Phase 8. The collection page and its tape popup (§4.2). The popup reuses `Popup.frame_box/title/GEOM` |
+| `test/reel.lua`, `tools/reel_check.py` | Phase 8. `reel_test()` records the split sine (§9.2) across its part boundaries; the script finds every boundary crossing in the position log and checks the second difference there (a misread jumps the sine's phase) |
 
 **Phase 2 result** (shield, Pi 3B+, 64 s ring, fx rack + mods; `field_L.flac`,
 1 h 56 min mono FLAC):
@@ -722,12 +841,46 @@ Decisions made while building it:
 - Tone is a fixed tilt (±9 dB shelves at 250 Hz / 2.5 kHz); if it needs a
   different character, it is two numbers in `AurOut.addDefs`.
 
-### 9.1b Next: phase 7 (region voices + MIDI triggers)
-Start from §2.4 (region voices) and §2.5 (budgets). A region voice is a
-second AurTape + AurOut pair in its own group (`id` 1..4; the OSC handlers
-already filter on node id + reply id) with a small ring and a head cache;
-AurOut already combines the regions at the voice's own position, so it
-takes `segs` from the same list (make the partition shared, not per voice).
+**Phase 8 result** (2026-11-20, shield, Pi 3B+, 260616):
+
+| | |
+|---|---|
+| `reel_test()` (sine440 split into 3 mono WAV parts at frames 14412345 and 25933122, not chunk-aligned) | 13 boundary crossings (1×, reverse, 2×, a seek 50 ms before the boundary, a 2 s loop over it, at both boundaries): all PASS, max second difference 1.25–1.32× a clean sine at 1× and 4.28× at 2× (= 2², clean); max anywhere in the run 4.3× (a misread jumps the phase: ~100×+) |
+| `transport_test` on a stereo FLAC reel (test30m split at 911.37 s into 2 FLAC parts) | basic + loops + edges: every check PASS, 0 misses, `jump_gain` 0.0; 1 xrun (loop20s_8x; the sporadic kind from phase 1). jack CPU 21.1–24.3 % avg (field_L single file: 19.3–22.7 %); far seeks 52.8 ms avg / 76.7 max. `idle_loaded` 36 % was its first analysis running |
+| analysis of a reel | 20 min mono reel (3 parts) in ~8 s; P1 + P2 loaded over the whole reel |
+| split hint and join (UI handlers from the REPL) | candidates: parts 2 and 3 `ok` by bext, an unrelated `REC0002.WAV` (same format) not; join from the popup (K3 twice) while part 1 was open: reel written, opened in its place, notes from parts 1 and 2 at 100 s and 310.257 s (part 2's 10 s + 300.257) |
+| relink | moved the reel's folder: found by name + size, notes moved, analysis cache renamed (no new pass); and back again |
+| start time | bext (14:00:00, time_ref) shows in the header with *clock* = time of day; a hand-set start from the popup (mtime guess, E3 +1 min) saved in the document; cleared back to none |
+| export | `recorded:` line, the reel's parts, `(14:01:40)` in headings, `date time` in the metadata |
+| redraw, collection page, playing | 3.8 ms avg, 11.6 max |
+| tests | `lua5.3 test/model_test.lua` and `notes_test()`: 110/110 (bext from synthetic WAVs incl. a JUNK chunk, wall clock across midnight and month ends, reel parse/load/format mismatch/candidates, `Model.append`, the index bootstrap/sort/rename, `Store.move`, the strip reader, export with an origin) |
+
+Decisions made while building it: see §8 (reel location, join is
+user-confirmed, parts keep their notes and caches, the index lists opened
+tapes, hand-set start wins). The tape popup's start row is called *start*
+(not *recorded*), shown to the minute; its source (FROM FILE / BY HAND) is
+in the popup title.
+
+**Open after phase 8:**
+- **Hands-on on the device**: the collection page and popup, join on real
+  recorder files (Zoom / Sound Devices / Tascam naming and bext), the wall
+  clock in daily use.
+- The parts' own documents and analysis caches stay after a join (a part
+  opened on its own still shows its old notes; caches cost ~85 MB per 2 h).
+  Offer to clean them up, or mark the part documents as joined.
+- No bext from FLAC: a FLAC made from a BWF loses the chunk (sox). The import
+  step (§2.3b) could carry it into the tape document, or read a Vorbis
+  comment (`DATE`, `TIME_REFERENCE`) where a tool wrote one.
+- A reel whose parts were edited (size, mtime) gets a new analysis; a part
+  missing makes the whole reel missing (relink finds the reel file only, not
+  single parts).
+- The collection doesn't scan `dust/audio` for new files; *add a tape* opens
+  the file browser.
+- No wall-clock labels on the ruler (needs a smaller font, §9.1 phase 3).
+
+### 9.1b Phase 7 (region voices + MIDI triggers): deferred (2026-11-20)
+Skipped for now; phase 8 comes first. When it is picked up, start from the
+revised AurVoice plan and its open questions in §2.4, and §2.5 (budgets).
 `rate` (§3, product) is the field still missing from `lib/sound.lua`.
 
 ### 9.2 Test assets on the shield (keep; ~2.3 GB)
@@ -745,6 +898,14 @@ takes `segs` from the same list (make the partition shared, not per voice).
   converted from a 32 kHz m4a). Speech, room tone, quiet stretches. Private
   research material: keep on the device, don't publish or commit.
 - `sine440.wav`: 20 min mono 440 Hz at −6 dB, for click checks.
+- `sinesplit/`: sine440 split into `REC0001.WAV`, `REC0001_0001.WAV`,
+  `REC0001_0002.WAV` (cuts at frames 14412345 and 25933122) with bext
+  chunks (2025-08-03 14:00:00, continuous time_ref), `REC0002.WAV` (30 s,
+  same format, not continuous), and `REC0001.reel` (the join). For
+  `reel_test()`; `reel.wav` is its last recording. The reel's document has
+  two test marks (part one, part two).
+- `flacsplit/`: test30m.flac (stereo) split at frame 43745792 into
+  `T30_A.flac`, `T30_B.flac`, with `T30.reel` written by hand.
 - `clicks.wav`: the last `clicks_test` recording.
 - Analysis cache for `field_L.flac` in `dust/data/aurotate/cache/field_L-d8063cae/`
   (p1 83 MB, p2 10 MB, peaks). Test reports from phase 2 in
@@ -813,6 +974,9 @@ per-voice inserts, fx rack.
   `scp we@10.0.0.138:dust/data/aurotate/name.png .` and crop (64, 64, 576, 320).
   Force the focus look with `dbg.Tape.focusing = function() return true end`
   and `dbg.Tape.st.proxy_share = 1` in the same REPL chunk as `dbg_shot`.
+- Reels: `reel_test()` (~1 min), then `scp` `dust/audio/aurotate-spike/reel.wav`
+  and `dust/data/aurotate/reel_events.txt` and run `tools/reel_check.py`
+  (numpy, scipy). `transport_test(path, …)` takes a `.reel` path too.
 - Tests: `transport_test()` (~8 min) or a subset, e.g.
   `transport_test(nil, {loops = true, edges = true})`; sections `basic`,
   `speed`, `scrub`, `loops`, `edges`. Wait for `dust/data/aurotate/transport_done`.

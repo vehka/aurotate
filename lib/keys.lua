@@ -12,7 +12,9 @@
 --
 -- On the regions page the hotkeys work too; Up/Down (PgUp/PgDn, Home/End)
 -- select, Enter jumps the tape there. In the reader popup Up/Down and
--- PgUp/PgDn scroll, Enter closes.
+-- PgUp/PgDn scroll, Enter closes. On the collection page Up/Down select,
+-- Enter opens the tape, Esc plays / stops (Keys.collection, set by the
+-- script: move(d), open(), busy()).
 --
 -- F1–F5 belong to the system menu (core/keyboard.lua takes them before the
 -- script sees them), hence F6–F9 rather than the usual F1–F4.
@@ -39,8 +41,20 @@ local MOVES = { LEFT = 'left', RIGHT = 'right', UP = 'up', DOWN = 'down', HOME =
 
 local LIST_MOVES = { UP = -1, DOWN = 1, PAGEUP = -7, PAGEDOWN = 7, HOME = -math.huge, END = math.huge }
 
+Keys.collection = nil
+
 function Keys.code(c, v)
   local pg = page()
+  if pg == 'collection' and Keys.collection and v > 0 and not Keys.collection.busy() then
+    if LIST_MOVES[c] then
+      Keys.collection.move(math.max(-100000, math.min(100000, LIST_MOVES[c])))
+    elseif v == 1 and (c == 'ENTER' or c == 'KPENTER') then
+      Keys.collection.open()
+    elseif v == 1 and c == 'ESC' and Tape.st.path then
+      Tape.toggle()
+    end
+    return
+  end
   if v == 0 or (pg ~= 'tape' and pg ~= 'regions') or Popup.modal or not Tape.st.path then return end
   local press = v == 1
   -- transport hotkeys, also while typing

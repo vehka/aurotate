@@ -4,9 +4,10 @@ An audio-anthropology workbench for norns: play recordings hours long on an
 analog-feeling tape, mark and annotate them, and give regions their own
 sound. Work in progress; see `docs/PLAN.md`.
 
-Current state: **phase 6**: marks, regions and notes (phase 4), the
-**regions list** with a reader and **notes export as Markdown** (phase 5), and
-**per-region sound** (phase 6). A SuperCollider engine streams
+Current state: **phase 8**: marks, regions and notes (phase 4), the
+**regions list** with a reader and **notes export as Markdown** (phase 5),
+**per-region sound** (phase 6), and the **collection**, **split-file reels**
+and the **wall clock** (phase 8). Phase 7 (region voices) is deferred. A SuperCollider engine streams
 the file from disk through a RAM ring window, so length is limited by disk,
 not RAM. When a tape is opened for the first time it is analysed in the
 background (about 1 minute per 2 hours on a Pi 3; the tape plays meanwhile).
@@ -21,7 +22,7 @@ shown above). Louder sound draws taller, brighter-sounding sound draws
 brighter. While a tape is analysed for the first time its waveform grows in
 as the pass goes; a far seek draws the waveform near the playhead dithered
 until the tape is in focus. The four dots at the top are pages (collection,
-tape, regions, settings); the tape and regions pages exist so far.
+tape, regions, settings); all but settings exist so far.
 
 On the tape you drop **marks** (points) and **regions** (stretches), and give
 each a label, a note and tags. Regions show as bright bands with the waveform
@@ -61,17 +62,50 @@ it. Such a region has a checkered top edge too. Without the fx mod, or with
 nothing in the send, the sends go nowhere: the popup says `(no fx)` or
 `(empty)` next to a send, and `SILENT` when the region can't be heard.
 
+**Collection** (K1+E1 to the first dot): every tape you have opened, newest
+first (E3: by name, by length). Each row has the title, a dot when it has
+notes and the length; ≡ marks a reel, `?` a tape whose file is gone. Under
+the list is the selected tape's overview with where you left it, its notes
+and when it was recorded. E2 selects, K3 opens it (and goes to the tape),
+K3 on the last row adds a tape, K2 plays / stops. K1+K3 opens the tape's
+popup:
+
+- *start*: when the recording started. Read from the WAV's BWF `bext`
+  chunk when there is one (`FROM FILE`); otherwise set it here (`BY HAND`):
+  E3 ±1 min, K1+E3 ±1 h, K3 types it (`YYYY-MM-DD HH:MM:SS`; the first guess
+  is the file's time stamp minus its length; empty goes back to the file's).
+- *join*: field recorders split long takes into 2/4 GB files. E3 picks how
+  many of the following files in the folder belong to this one (`ok` when
+  their `bext` time stamps say they continue it), K3 twice joins them into a
+  **reel**: a small text file `<first part>.reel` next to the parts, one
+  file name per line, which plays as one seamless tape. Notes already made on
+  the parts move onto the reel at the right places. You can write a `.reel`
+  by hand too, and open it like any tape. Opening a file that the next file
+  continues says so in the header.
+- *relink*: a tape whose file was moved or renamed: K3 searches
+  `dust/audio` for a file with its name and size, E3 picks, K3 twice moves
+  its notes (and its analysis) there.
+- *forget*: drops it from the list; its notes stay on disk.
+
+On a USB keyboard Up/Down select, Enter opens, Esc plays / stops.
+
+**Wall clock:** PARAMS > TAPE > *clock* shows *time of day* instead of the
+offset (in the header, the regions list and the popup), for tapes whose
+start is known. The notes export always gives both.
+
 **Export:** PARAMS > TAPE > *export notes (md)* writes
 `dust/data/aurotate/exports/<tape>/notes.md` (reach it over SMB or `scp`):
-one section per mark and region in tape order, with its times, label,
-enclosing region, tags (as `#hashtags`), sound settings and note. The previous export is kept
+one section per mark and region in tape order, with its times (and the time
+of day, when the recording's start is known), label, enclosing region, tags
+(as `#hashtags`), sound settings and note. The previous export is kept
 as `notes.md.bak`. The `<!-- aur:m3 -->` lines tie each section to its mark or
 region, for reading edits back in later; leave them as they are.
 
 ## Requirements
 
 - norns 3.x (developed on the 260616 beta; Pi 3 and Pi 4)
-- 48 kHz WAV or FLAC files work best (other rates play at the right speed)
+- 48 kHz WAV or FLAC files work best (other rates play at the right speed);
+  the parts of a reel must share rate and channel count
 - `sox` and `gcc` on the device for the analysis (both are on standard
   norns images); the helper `aurpeaks` is built on first use
 - After installing or updating: SYSTEM > RESTART (the engine is a new class)
@@ -113,7 +147,7 @@ USB keyboard, on the tape page:
 (F1–F5 open the system menu, as everywhere on norns.) The tag palette is
 `dust/data/aurotate/tags.lua`, a plain list you can edit.
 
-Choose a tape with K3 (when none is open) or in PARAMS > TAPE > tape. The same group holds speed, level,
+Choose a tape in the collection, with K3 (when none is open) or in PARAMS > TAPE > tape. The same group holds speed, level, the clock,
 spin-up time, the resume rewind for Esc, the lifter (how much of the tape you hear at speed: 0 % = full
 head contact, 100 % = lifted, silent), the focus time, scrub feel (nudge,
 acceleration, stop time), loop points, the ring window size, the seek/seam
@@ -132,6 +166,8 @@ transport_test(nil, {analysis = true, cue = true})  -- fresh analysis while play
 clicks_test()           -- records the output while seeking/looping a sine
 sound_test()            -- region sound: records a sine through test regions;
                         -- then tools/sound_check.py sound.wav sound_events.txt
+reel_test()             -- reels: records a sine split into 3 parts across the
+                        -- boundaries; then tools/reel_check.py reel.wav reel_events.txt
 export_notes()          -- same as PARAMS > TAPE > export notes (md)
 dbg_status()            -- transport state, redraw time and Lua heap
 dbg_shot('name')        -- screenshot to dust/data/aurotate/name.png

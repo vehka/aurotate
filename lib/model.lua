@@ -1,10 +1,12 @@
 -- model: the tape document, its marks and regions (docs/PLAN.md §3)
 --
---   doc    = { version, tape = { path, size, dur, title, last_pos }, next_id,
+--   doc    = { version, tape = { path, size, dur, title, last_pos, origin? }, next_id,
 --              marks = { mark... }, regions = { region... } }
 --   mark   = { id = 'm3', t, label, note, tags = {}, created }
 --   region = { id = 'r4', t0, t1, label, note, tags = {}, created,
 --              snd = { dry, send_a, send_b, gain, pan, tone }? }  (lib/sound.lua)
+--   origin = { date, secs, source }: where the recording starts, for the
+--            wall clock (lib/wallclock.lua)
 --
 -- Pure data, no norns calls, so it can be tested off the device. Lists stay
 -- sorted by time (marks by t, regions by t0). Every change goes through a
@@ -12,6 +14,7 @@
 -- schedule a save.
 
 local Sound = include 'lib/sound'
+local Wall = include 'lib/wallclock'
 
 local Model = {}
 
@@ -225,6 +228,46 @@ function Model.at(doc, t, tol)
   return Model.mark_near(doc, t, tol) or Model.innermost(doc, t)
 end
 
+-- copy every mark and region of `other` into `doc`, `offset` seconds later,
+-- with new ids (a reel joining parts that had notes of their own). Labels,
+-- notes, tags and sound come along. Returns how many were copied.
+function Model.append(doc, other, offset)
+  local n = 0
+  local function copy_tags(t)
+    local out = {}
+    for i, x in ipairs(t) do out[i] = x end
+    return out
+  end
+  local function copy_snd(snd)
+    if not snd then return nil end
+    local out = {}
+    for k, v in pairs(snd) do out[k] = v end
+    return out
+  end
+  for _, m in ipairs(other.marks) do
+    local c = { id = new_id(doc, 'm'), t = clamp_t(doc, m.t + offset), label = m.label, note = m.note,
+      tags = copy_tags(m.tags), created = m.created }
+    insert_sorted(doc.marks, c, 't')
+    n = n + 1
+  end
+  for _, r in ipairs(other.regions) do
+    local a, b = clamp_t(doc, r.t0 + offset), clamp_t(doc, r.t1 + offset)
+    if b - a >= Model.MIN_REGION then
+      local c = { id = new_id(doc, 'r'), t0 = a, t1 = b, label = r.label, note = r.note,
+        tags = copy_tags(r.tags), created = r.created, snd = copy_snd(r.snd) }
+      insert_sorted(doc.regions, c, 't0')
+      n = n + 1
+    end
+  end
+  if n > 0 then Model.changed(doc) end
+  return n
+end
+
+function Model.set_origin(doc, origin)
+  doc.tape.origin = origin
+  Model.changed(doc)
+end
+
 ---- loading: validation and migrations
 
 -- migrations[v] turns a version v document into version v + 1
@@ -278,6 +321,7 @@ function Model.validate(t)
     num(tape.dur) and tape.dur or nil, num(tape.size) and tape.size or nil)
   doc.tape.title = str(tape.title)
   doc.tape.last_pos = num(tape.last_pos) and math.max(0, tape.last_pos) or 0
+  doc.tape.origin = Wall.clean(tape.origin)
   local max_id, dropped, ids = 0, 0, {}
   local function take_id(id, prefix)
     if type(id) ~= 'string' or id:sub(1, 1) ~= prefix or ids[id] then return nil end

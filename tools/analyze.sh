@@ -1,7 +1,10 @@
 #!/bin/bash
 # analyze.sh: one disk pass over a tape, writing the analysis cache.
 #
-#   analyze.sh <tape> <cache dir> <aurpeaks binary>
+#   analyze.sh <cache dir> <aurpeaks binary> <file> [<file> ...]
+#
+# Several files are a reel (recorder split files): they are analysed as one
+# tape, in the order given (sox concatenates them).
 #
 # Writes into the cache dir:
 #   peaks      aurpeaks output (level 0 grows while the pass runs)
@@ -17,9 +20,11 @@
 # missing or older. Meant to run detached: setsid nice ionice … &
 
 set -u -o pipefail
-in=$1
-dir=$2
-bin=$3
+dir=$1
+bin=$2
+shift 2
+ins=("$@")
+in=${ins[0]}
 src=$(cd "$(dirname "$0")" && pwd)/aurpeaks.c
 
 mkdir -p "$dir" || exit 1
@@ -58,7 +63,7 @@ pk=$!
 sox -V1 $raw fifo_p1 -b 16 p1.tmp.wav channels 1 rate "$p1" &
 s1=$!
 # shellcheck disable=SC2086
-sox -V1 "$in" -t raw -e signed -b 16 -L - | tee fifo_pk fifo_p1 \
+sox -V1 "${ins[@]}" -t raw -e signed -b 16 -L - | tee fifo_pk fifo_p1 \
   | sox -V1 $raw - -b 16 p2.tmp.wav channels 1 rate "$p2" || fail "decode / P2"
 wait $pk || fail "aurpeaks"
 wait $s1 || fail "P1"

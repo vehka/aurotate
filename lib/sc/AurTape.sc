@@ -27,6 +27,11 @@
 // Cue: above 2x the output goes through the lifter (head contact): quieter,
 // band-limited and slightly driven as the tape is lifted off the head.
 //
+// Reels (phase 8): a tape can be several files played as one (recorder split
+// files). `parts` maps tape frames to files, [path, first tape frame, frames]
+// per part; a read that spans a part boundary becomes one read per part.
+// The proxies and peaks cover the whole reel (the analysis concatenates).
+//
 // Frame positions are float32 on the server. Every position the server is
 // given is a multiple of `quant` frames, so it is exact up to 2^30 frames
 // (6.2 h at 48 kHz) and the ring offset computed here matches it.
@@ -35,7 +40,7 @@ AurTape {
 	classvar <chunkSecs = 4, <quant = 64, <decim = #[8, 64], <pieceFrames = 524288;
 
 	var <server, <target, <outBus, <ringSecs, <id;
-	var <path, <numFrames = 0, <fileChannels = 2, <fileRate = 48000;
+	var <path, <numFrames = 0, <fileChannels = 2, <fileRate = 48000, <parts;
 	var <ring, <valid, <synth, <slots, <chunkFrames, <ringFrames, <numChunks = 0;
 	var slotChunk, inflight, loading = false, holdChunk, holdUntil = 0;
 	var <pos = 0, <actualRate = 0, <targetRate = 0, <ok = 0, <jogging = false;
@@ -210,30 +215,54 @@ AurTape {
 
 	q { |frame| ^(frame / quant).round * quant }
 
-	// open a file; requests made while one is loading are queued (last wins)
-	open { |argPath, startSecs = 0|
+	// open a file, or a reel (`partPaths`: its files in order; `argPath` is
+	// then the reel's own path, its identity). Requests made while one is
+	// loading are queued (last wins)
+	open { |argPath, startSecs = 0, partPaths|
 		// a new tape starts stopped; rate commands sent while it loads still count
 		targetRate = 0; jogging = false;
-		this.prOpen(argPath, startSecs);
+		this.prOpen(argPath, startSecs, partPaths);
 	}
 
-	prOpen { |argPath, startSecs|
-		if(loading) { queued = [argPath, startSecs]; ^this };
+	prOpen { |argPath, startSecs, partPaths|
+		if(loading) { queued = [argPath, startSecs, partPaths]; ^this };
 		loading = true;
 		fork {
-			this.load(argPath, startSecs);
+			this.load(argPath, startSecs, partPaths);
 			loading = false;
 			if(queued.notNil) { var q = queued; queued = nil; this.prOpen(*q) };
 		}
 	}
 
+	// [path, first tape frame, frames] per part, and the format; nil (and a
+	// message) when a part can't be opened or differs from the first
+	*scanParts { |paths|
+		var out = List.new, total = 0, ch, rate;
+		paths.do { |p, i|
+			var sf = SoundFile.openRead(p.standardizePath);
+			if(sf.isNil) { ("AurTape: can't open part % (%)".format(i + 1, p)).postln; ^nil };
+			sf.close;
+			if(i == 0) { ch = sf.numChannels; rate = sf.sampleRate } {
+				if(sf.numChannels != ch or: { sf.sampleRate != rate }) {
+					("AurTape: part % differs from the first (% ch, % Hz)".format(i + 1, sf.numChannels, sf.sampleRate)).postln;
+					^nil
+				}
+			};
+			out.add([sf.path, total, sf.numFrames]);
+			total = total + sf.numFrames;
+		};
+		^[out.asArray, total, ch, rate]
+	}
+
 	// call from a Routine; use `open` otherwise
-	load { |argPath, startSecs = 0|
-		var startFrame, sf = SoundFile.openRead(argPath.standardizePath);
-		if(sf.isNil) { ("AurTape: can't open " ++ argPath).postln; ^false };
-		if(sf.path != path) { 2.do { |i| this.prDropProxy(i) } };
-		path = sf.path; numFrames = sf.numFrames; fileChannels = sf.numChannels; fileRate = sf.sampleRate;
-		sf.close;
+	load { |argPath, startSecs = 0, partPaths|
+		var startFrame, scan, newPath;
+		scan = this.class.scanParts(partPaths ?? { [argPath] });
+		if(scan.isNil or: { scan[1] <= 0 }) { ("AurTape: can't open " ++ argPath).postln; ^false };
+		newPath = if(partPaths.isNil) { scan[0][0][0] } { argPath.standardizePath };
+		if(newPath != path) { 2.do { |i| this.prDropProxy(i) } };
+		path = newPath;
+		#parts, numFrames, fileChannels, fileRate = scan;
 		startFrame = (startSecs * fileRate).clip(0, numFrames - 1);
 		this.prFreeServer;
 		server.sync;
@@ -256,8 +285,9 @@ AurTape {
 			\rate, targetRate, \amp, amp, \jogStop, jogStop, \fade, fade, \lifter, lifter, \focus, focus
 		] ++ this.prLoopArgs ++ this.prProxyArgs, target);
 		pos = startFrame; actualRate = 0; parked = false; nudgeTotal = 0;
-		("AurTape: % (% s, % ch, % Hz), ring % s in % slots"
-			.format(path, (numFrames / fileRate).round(0.1), fileChannels, fileRate, ringSecs, slots)).postln;
+		("AurTape: % (% s, % ch, % Hz%), ring % s in % slots"
+			.format(path, (numFrames / fileRate).round(0.1), fileChannels, fileRate,
+				if(parts.size > 1) { ", % parts".format(parts.size) } { "" }, ringSecs, slots)).postln;
 		this.jump(startFrame);
 		2.do { |i| this.prApplyProxy(i) };
 		^true
@@ -267,7 +297,10 @@ AurTape {
 	setRing { |secs, reopen = true|
 		if(secs == ringSecs) { ^this };
 		ringSecs = secs;
-		if(reopen and: { path.notNil }) { jogging = false; this.prOpen(path, pos / fileRate) }
+		if(reopen and: { path.notNil }) {
+			jogging = false;
+			this.prOpen(path, pos / fileRate, if(parts.size > 1) { parts.collect { |p| p[0] } })
+		}
 	}
 
 	duration { ^numFrames / fileRate }
@@ -446,19 +479,44 @@ AurTape {
 		var chans = if(fileChannels == 1) { [0, 0] } { [0, 1] };
 		var chunks = (w .. w + count - 1);
 		var setValid = [\b_set, valid.bufnum] ++ chunks.collect { |c, i| [slot + i, c] }.flatten;
+		var pieces = this.prPieces(start, n);
 		chunks.do { |c, i| slotChunk[slot + i] = -2; server.sendMsg(\b_set, valid.bufnum, slot + i, -1) };
-		inflight = (chunks: chunks, slot: slot, t: Main.elapsedTime, n: n);
+		inflight = (chunks: chunks, slot: slot, t: Main.elapsedTime, n: n, piecesLeft: pieces.size, anyFailed: false);
 		// the last chunk is partial: silence the rest of its slot (sample indices are interleaved)
 		if(n < (chunkFrames * count)) {
 			server.sendMsg(\b_fill, ring.bufnum, (slot * chunkFrames + n) * 2, (chunkFrames * count - n) * 2, 0)
 		};
-		server.listSendMsg([\b_readChannel, ring.bufnum, path, start, n, slot * chunkFrames, 0]
-			++ chans ++ [setValid]);
+		// one read per part the range touches; the NRT queue runs them in
+		// order, so the last one's completion marks every chunk valid
+		pieces.do { |pc, i|
+			var file, off, len, at;
+			#file, off, len, at = pc;
+			server.listSendMsg([\b_readChannel, ring.bufnum, file, off, len, slot * chunkFrames + at, 0]
+				++ chans ++ if(i == (pieces.size - 1)) { [setValid] } { [] });
+		};
+	}
+
+	// tape frames [start, start + n) as [file, offset in it, frames, offset in
+	// the range] per part
+	prPieces { |start, n|
+		var out = List.new, end = start + n;
+		parts.do { |p|
+			var a = max(start, p[1]), b = min(end, p[1] + p[2]);
+			if(b > a) { out.add([p[0], a - p[1], b - a, a - start]) };
+		};
+		^out
 	}
 
 	prReadDone { |okRead|
 		var dt;
 		if(inflight.isNil) { ^this };
+		if(okRead.not) { inflight.anyFailed = true };
+		inflight.piecesLeft = inflight.piecesLeft - 1;
+		if(inflight.piecesLeft > 0) { ^this };
+		okRead = inflight.anyFailed.not;
+		// a failed piece may leave the last one's completion marking the
+		// chunks valid: unmark them
+		if(okRead.not) { inflight.chunks.do { |c, i| server.sendMsg(\b_set, valid.bufnum, inflight.slot + i, -1) } };
 		dt = Main.elapsedTime - inflight.t;
 		inflight.chunks.do { |c, i| slotChunk[inflight.slot + i] = if(okRead) { c } { -1 } };
 		st.reads = st.reads + 1;

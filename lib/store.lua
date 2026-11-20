@@ -117,6 +117,13 @@ local function ser_value(v, indent, out)
   end
 end
 
+-- one value as Lua source (the collection index uses it)
+function Store.serialise_value(t)
+  local out = {}
+  ser_value(t, '', out)
+  return table.concat(out)
+end
+
 function Store.serialise(t)
   local out = { '-- aurotate tape document\nreturn ' }
   ser_value(t, '', out)
@@ -159,6 +166,21 @@ end
 
 -- atomic write with a .bak of the old file (exports use it too)
 Store.write_file = write_file
+Store.read_lua = read_lua
+
+-- every tape document there is (validated), for building the collection the
+-- first time. list(dir) → file names (util.scandir on norns)
+function Store.all_docs(list)
+  local out = {}
+  for _, n in ipairs(list(dir .. 'tapes/') or {}) do
+    if n:match('%.lua$') then
+      local t = read_lua(dir .. 'tapes/' .. n)
+      local d = t and Model.validate(t)
+      if d then out[#out + 1] = d end
+    end
+  end
+  return out
+end
 
 ---- the open document
 
@@ -247,6 +269,42 @@ function Store.close(pos)
   if pos then Store.set_pos(pos) end
   Store.flush()
   doc, doc_path, due, readonly = nil, nil, nil, nil
+end
+
+---- documents of tapes that aren't open (the collection: join, relink)
+
+-- the document of `path`, or nil (no file, unreadable or newer)
+function Store.peek(path)
+  local t = read_lua(Store.path_of(path))
+  return t and (Model.validate(t)) or nil
+end
+
+-- write a document for `path` (not the open one)
+function Store.put(path, d)
+  if doc_path == Store.path_of(path) then return false, 'open' end
+  return write_file(Store.path_of(path), Store.serialise(d))
+end
+
+-- the document of `old` becomes the document of `new` (a moved file).
+-- Refuses when `new` has one already.
+function Store.move(old, new)
+  local from, to = Store.path_of(old), Store.path_of(new)
+  if from == to then return true end
+  if doc_path == from or doc_path == to then return false, 'open' end
+  local f = io.open(to, 'r')
+  if f then
+    f:close()
+    return false, 'the new place has notes of its own'
+  end
+  local t = read_lua(from)
+  local d = t and Model.validate(t)
+  if not d then return false, 'no notes' end
+  d.tape.path = new
+  local ok, err = write_file(to, Store.serialise(d))
+  if not ok then return false, err end
+  os.rename(from, from .. '.moved')
+  os.remove(from .. '.bak')
+  return true
 end
 
 ---- the last tape, the tag palette

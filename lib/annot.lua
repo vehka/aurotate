@@ -8,9 +8,10 @@
 local Model = include 'lib/model'
 local Store = include 'lib/store'
 local Export = include 'lib/export'
+local Collection = include 'lib/collection'
 
 local Annot = {}
-Annot.Model, Annot.Store, Annot.Export = Model, Store, Export
+Annot.Model, Annot.Store, Annot.Export, Annot.Collection = Model, Store, Export, Collection
 Annot.rev = 0 -- counts edits, so lists know when to rebuild
 
 Annot.HOLD = 0.4       -- s: a longer K3 press starts a region
@@ -25,6 +26,8 @@ local parked = 0
 function Annot.init(tape, view)
   Tape, View = tape, view
   Store.init(norns.state.data, util.time)
+  Collection.init(norns.state.data, Store)
+  Collection.load(function() return Store.all_docs(util.scandir) end)
   Model.changed = function()
     Annot.rev = Annot.rev + 1
     Store.touch()
@@ -40,17 +43,56 @@ function Annot.doc_path() return Store.doc() and Store.path_of(Store.doc().tape.
 -- position it was left at), open the new one. Returns the start position.
 function Annot.switch(path, dur)
   local st = Tape.st
-  if Store.doc() then Store.close(st.path and st.pos or nil) end
+  Annot.leave()
   k3.down, k3.held = nil, false
   local f = io.open(path, 'r')
   local size = f and f:seek('end') or nil
   if f then f:close() end
   local doc, msg = Store.open(path, dur, size)
+  -- the bext chunk knows when the recording started, unless someone set it
+  -- by hand (not saved by itself: it comes from the file again next time)
+  local o = doc.tape.origin
+  if st.bext and (not o or o.source == 'bext') then doc.tape.origin = st.bext end
+  if not st.bext and o and o.source == 'bext' then doc.tape.origin = nil end
+  st.origin = doc.tape.origin
   Annot.rev = Annot.rev + 1
   if msg then View.message(msg, 3) end
   local start = doc.tape.last_pos or 0
   if start >= dur - 1 then start = 0 end
   return start
+end
+
+-- the open tape is left (another opens, the script stops): its position
+-- and counts go to the document and the collection
+function Annot.leave()
+  local st = Tape.st
+  local doc = Store.doc()
+  if not doc then return end
+  if st.path then Store.set_pos(st.pos) end
+  Collection.from_doc(doc)
+  Store.close()
+end
+
+-- Tape.open has switched: the collection learns about the tape
+function Annot.opened()
+  local st = Tape.st
+  local doc = Store.doc()
+  if not st.path then return end
+  local e = Collection.update(st.path, { opened = os.time(), dur = st.dur, cache = Tape.analysis.dir,
+    parts = st.parts and #st.parts or nil })
+  if not st.parts then e.parts = nil end
+  if doc then Collection.from_doc(doc) end
+end
+
+-- set (or with nil, clear) when the open tape's recording started; a
+-- cleared one falls back to the bext chunk
+function Annot.set_origin(origin)
+  local doc = Store.doc()
+  if not doc then return end
+  Model.set_origin(doc, origin or Tape.st.bext)
+  Tape.st.origin = doc.tape.origin
+  Collection.from_doc(doc)
+  Tape.dirty = true
 end
 
 -- seconds per pixel of the tape view, for "here"
@@ -137,6 +179,7 @@ function Annot.tick()
     Annot.park()
   end
   Store.tick()
+  Collection.tick()
 end
 
 ---- loop the region here (K1+K2)
@@ -188,7 +231,8 @@ function Annot.export()
     View.message('NO TAPE', 1)
     return nil
   end
-  local path, err = Export.write(doc, norns.state.data, Store.id(doc.tape.path), Store.write_file)
+  local path, err = Export.write(doc, norns.state.data, Store.id(doc.tape.path), Store.write_file, nil,
+    Tape.st.parts)
   if path then
     View.message('EXPORTED NOTES.MD', 2)
     print('aurotate: exported ' .. path)
@@ -201,7 +245,8 @@ function Annot.export()
 end
 
 function Annot.cleanup()
-  if Store.doc() then Store.close(Tape.st.path and Tape.st.pos or nil) end
+  Annot.leave()
+  Collection.flush()
 end
 
 return Annot

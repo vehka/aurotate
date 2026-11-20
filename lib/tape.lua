@@ -3,6 +3,9 @@
 local cs = require 'controlspec'
 local Analysis = include 'lib/analysis'
 local Peaks = include 'lib/peaks'
+local Reel = include 'lib/reel'
+local Bext = include 'lib/bext'
+local Wall = include 'lib/wallclock'
 
 local Tape = {}
 
@@ -14,6 +17,9 @@ Tape.st = {
   proxy_share = 0, -- engine: 0..1 of the sound from the proxies
   fx = 0,          -- engine: bit 1 fx send a found, bit 2 send b
   peaks = nil,     -- lib/peaks object once analysed
+  parts = nil,     -- a reel's files (lib/reel.lua); nil for a single file
+  origin = nil,    -- where the recording starts (lib/wallclock.lua), from the document
+  bext = nil,      -- the origin the file's bext chunk gives, if any
 }
 Tape.analysis = Analysis.st
 local st = Tape.st
@@ -49,6 +55,15 @@ function Tape.hms(s, frac)
   local str = string.format('%d:%02d:%02d', whole // 3600, (whole % 3600) // 60, whole % 60)
   if frac then str = str .. string.format('.%d', math.floor((s - whole) * 10)) end
   return str
+end
+
+-- a position as the header shows it: the offset, or the time of day when
+-- PARAMS > TAPE > clock says so and the tape's start is known
+function Tape.wall() return params:get('aur_clock') == 2 and st.origin ~= nil end
+
+function Tape.clock(s, frac)
+  if Tape.wall() then return Wall.time(st.origin, s, frac) end
+  return Tape.hms(s, frac)
 end
 
 ---- transport
@@ -210,20 +225,42 @@ end
 ---- files
 
 -- Tape.on_open(path, dur) is called before the switch (st still holds the
--- old tape) and returns the start position when `start` is nil
+-- old tape) and returns the start position when `start` is nil;
+-- Tape.on_opened() after it (st holds the new tape, the analysis started)
 Tape.on_open = nil
+Tape.on_opened = nil
 Tape.hold_open = false -- true: the aur_file action doesn't open (startup)
+
+Tape.err = nil -- why the last open failed, for the UI
 
 function Tape.open(path, start)
   if path == nil or path == '' or path:sub(-1) == '/' or not util.file_exists(path) then return false end
-  local ch, samples, rate = audio.file_info(path)
+  local ch, samples, rate, parts
+  if Reel.is(path) then
+    local reel, err = Reel.load(path, audio.file_info)
+    if not reel then
+      Tape.err = err
+      print('aurotate: reel ' .. path .. ': ' .. err)
+      return false
+    end
+    ch, samples, rate = reel.ch, reel.frames, reel.rate
+    parts = {}
+    for i, p in ipairs(reel.parts) do parts[i] = p.path end
+  else
+    ch, samples, rate = audio.file_info(path)
+  end
   if not samples or samples <= 0 or not rate or rate <= 0 then
+    Tape.err = 'not a sound file'
     print('aurotate: not a sound file: ' .. path)
     return false
   end
+  Tape.err = nil
+  -- the time of day the recording starts, from the (first) file's bext
+  st.bext = Bext.origin(Bext.read(parts and parts[1] or path))
   local from_doc = Tape.on_open and Tape.on_open(path, samples / rate)
   start = start or from_doc or 0
   st.path = path
+  st.parts = parts
   st.name = path:match('[^/]*$'):gsub('%.%w+$', '')
   st.dur = samples / rate
   st.ch = ch
@@ -233,10 +270,17 @@ function Tape.open(path, start)
   st.peaks = nil
   st.proxies = 0
   params:set('aur_shuttle', 0, true)
-  engine.open(path, start, params:get('aur_ring'))
+  if parts then
+    engine.reel_clear(#parts)
+    for _, p in ipairs(parts) do engine.reel_part(p) end
+    engine.open_reel(path, start, params:get('aur_ring'), #parts)
+  else
+    engine.open(path, start, params:get('aur_ring'))
+  end
   send_loop()
   peaks_loaded = 0
-  Analysis.start(path, samples, analysed, analysing)
+  Analysis.start(path, samples, analysed, analysing, parts)
+  if Tape.on_opened then Tape.on_opened() end
   Tape.dirty = true
   return true
 end
@@ -252,7 +296,7 @@ local function fmt_time(p) return Tape.hms(p:get(), true) end
 
 function Tape.add_params()
   local pi3 = mem_total_mb() < 1500
-  params:add_group('aur_tape', 'TAPE', 23)
+  params:add_group('aur_tape', 'TAPE', 24)
 
   params:add_file('aur_file', 'tape', _path.audio)
   params:set_action('aur_file', function(path)
@@ -271,6 +315,11 @@ function Tape.add_params()
   params:set_action('aur_level', function(db) engine.amp(db <= -60 and 0 or util.dbamp(db)) end)
 
   params:add_control('aur_glide', 'spin up / down', cs.new(0.02, 3, 'exp', 0, 0.4, 's'))
+
+  -- the time of day needs the recording's start: the bext chunk, or set in
+  -- the collection (K1+K3 on a tape)
+  params:add_option('aur_clock', 'clock', { 'offset', 'time of day' }, 1)
+  params:set_action('aur_clock', function() Tape.dirty = true end)
 
   params:add_separator('aur_sep_cue', 'cue + focus')
   params:add_control('aur_lifter', 'lifter (at speed)', cs.new(0, 100, 'lin', 1, 50, '%'))

@@ -164,7 +164,7 @@ function R.redraw(page, pages)
   clamp_sel(list)
   local state, slev = View.state_label(Tape, st)
   local name = (R.filter and ('#' .. R.filter) or 'ALL') .. ' ' .. #list
-  Draw.header(page, pages, name, state, slev, st.path and Tape.hms(st.pos, true) or nil, 8, R.filter ~= nil)
+  Draw.header(page, pages, name, state, slev, st.path and Tape.clock(st.pos, true) or nil, 8, R.filter ~= nil)
   local doc = Annot.doc()
   if not st.path or not doc then
     screen.level(4)
@@ -219,7 +219,7 @@ function R.redraw(page, pages)
     end
     screen.fill()
     x = x + 6
-    local tc = Export.tc(Model.start(item), long)
+    local tc = Tape.wall() and Tape.clock(Model.start(item)) or Export.tc(Model.start(item), long)
     screen.level(sel and 15 or 5)
     screen.move(x, y + 6)
     screen.text(tc)

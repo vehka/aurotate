@@ -2,7 +2,8 @@
 -- an audio-anthropology workbench:
 -- hours-long recordings on tape
 --
--- phase 6: per-region sound
+-- phase 8: collection, reels,
+-- wall clock
 --
 -- E1 zoom
 -- K1+E1 page
@@ -26,6 +27,11 @@
 -- K3 jump there, K1+K3 read
 -- K1+K2 loop the region
 --
+-- collection page (K1+E1 left):
+-- E2 select, E3 sort, K3 open
+-- K1+K3 tape: start time, join
+-- split files, relink, forget
+--
 -- tape: K3 or PARAMS > TAPE
 
 engine.name = 'Aurotate'
@@ -39,6 +45,9 @@ local Popup = include 'lib/ui/popup'
 local Keys = include 'lib/keys'
 local Regions = include 'lib/ui/regions'
 local RS = include 'lib/region_sound'
+local Shelf = include 'lib/shelf'
+local Coll = include 'lib/ui/collection'
+local TapePopup = include 'lib/ui/tape_popup'
 
 local st = Tape.st
 local shift = false
@@ -52,7 +61,7 @@ local FPS = 15
 local redraw_metro
 local stats = { n = 0, sum = 0, max = 0 } -- redraw time, for dbg_status()
 
----- pages (K1+E1); tape and regions exist so far
+---- pages (K1+E1); settings doesn't exist yet
 
 local PAGES = { 'collection', 'tape', 'regions', 'settings' }
 local page = 2
@@ -75,8 +84,27 @@ local function choose_tape()
   end)
 end
 
+local function goto_page(name)
+  for i, p in ipairs(PAGES) do
+    if p == name then page = i end
+  end
+  Popup.reset()
+  TapePopup.reset()
+  if PAGES[page] == 'regions' then Regions.enter() end
+  if PAGES[page] == 'collection' then Coll.enter() end
+  Tape.dirty = true
+end
+
 function init()
   Annot.init(Tape, View)
+  Shelf.init(Tape, Annot)
+  Coll.init(Tape, Annot, Shelf, View)
+  TapePopup.init(Tape, Annot, Shelf, Popup)
+  TapePopup.on_done = function(msg, path)
+    View.message(msg, 2)
+    if path then Coll.select_path(path) else Coll.changed() end
+    Tape.dirty = true
+  end
   Popup.init(Tape, Annot)
   Regions.init(Tape, Annot, View)
   RS.init(Tape, Annot)
@@ -85,6 +113,21 @@ function init()
   Tape.on_open = function(path, dur)
     Popup.reset()
     return Annot.switch(path, dur)
+  end
+  Keys.collection = {
+    move = function(d) Coll.move(d) end,
+    open = function()
+      local r = Coll.open()
+      if r == 'add' then choose_tape() elseif r then goto_page('tape') end
+    end,
+    busy = function() return TapePopup.active() or TapePopup.modal or Popup.modal end,
+  }
+  Tape.on_opened = function()
+    Annot.opened()
+    Coll.changed()
+    -- a recorder split file: say that it can be joined
+    local n = Shelf.split_hint(Tape.st.path)
+    if n then View.message('PART OF ' .. n .. ': JOIN IN COLLECTION', 4) end
   end
   Tape.on_export = function() Annot.export() end
   Tape.add_params()
@@ -106,7 +149,7 @@ function init()
   redraw_metro = metro.init(function()
     Annot.tick()
     RS.tick()
-    if selecting or Popup.modal then return end
+    if selecting or Popup.modal or TapePopup.modal then return end
     if View.tick() then Tape.dirty = true end
     if Popup.tick() then Tape.dirty = true end
     if Tape.dirty then
@@ -121,6 +164,23 @@ function key(n, z)
   if n == 1 then
     shift = z == 1
     if z == 0 and util.time() - last_seek < SEEK_GRACE then last_seek = util.time() end
+    return
+  end
+  if PAGES[page] == 'collection' then
+    if TapePopup.active() then
+      TapePopup.key(n, z, shift)
+    elseif z == 1 and n == 2 then
+      Tape.toggle()
+    elseif z == 1 and n == 3 then
+      if shift then
+        local e = Coll.selected()
+        if e then TapePopup.open(e) else choose_tape() end
+      else
+        local r = Coll.open()
+        if r == 'add' then choose_tape() elseif r then goto_page('tape') end
+      end
+    end
+    Tape.dirty = true
     return
   end
   if PAGES[page] ~= 'tape' and PAGES[page] ~= 'regions' then return end
@@ -160,9 +220,21 @@ function enc(n, d)
     page = util.clamp(page + d, 1, #PAGES)
     if page ~= was then
       Popup.reset() -- a popup belongs to the page it was opened on
+      TapePopup.close()
       if PAGES[page] == 'regions' then Regions.enter() end
+      if PAGES[page] == 'collection' then Coll.enter() end
     end
     Tape.dirty = true
+    return
+  end
+  if PAGES[page] == 'collection' then
+    if TapePopup.active() then
+      if n ~= 1 then TapePopup.enc(n, d, shift) end
+    elseif n == 2 then
+      Coll.move(d)
+    elseif n == 3 then
+      Coll.sort_turn(d)
+    end
     return
   end
   if PAGES[page] == 'regions' then
@@ -203,7 +275,9 @@ function redraw()
     Popup.redraw()
     screen.update()
   elseif PAGES[page] == 'collection' then
-    placeholder('collection', 8)
+    Coll.redraw(page, #PAGES)
+    TapePopup.redraw()
+    screen.update()
   elseif PAGES[page] == 'regions' then
     Regions.redraw(page, #PAGES)
     Popup.redraw()
@@ -257,20 +331,23 @@ function sound_test(path, only)
   return include('test/sound').run(Tape, Annot, RS, path, only)
 end
 
+-- reels: records a sine split into parts across the part boundaries
+-- (test/reel.lua); check with tools/reel_check.py
+function reel_test(path, bounds)
+  return include('test/reel').run(Tape, path, bounds)
+end
+
 function clicks_test(path)
   return include('test/transport').clicks(Tape, path)
 end
 
 -- REPL handles: dbg.Tape, dbg.View; dbg_shot(name) redraws and saves the
 -- screen to dust/data/aurotate/<name>.png
-dbg = { Tape = Tape, View = View, Annot = Annot, Popup = Popup, Keys = Keys, Regions = Regions, RS = RS }
+dbg = { Tape = Tape, View = View, Annot = Annot, Popup = Popup, Keys = Keys, Regions = Regions, RS = RS,
+  Shelf = Shelf, Coll = Coll, TapePopup = TapePopup }
 -- REPL: dbg_page('regions') shows a page
 function dbg_page(name)
-  for i, p in ipairs(PAGES) do
-    if p == name then page = i end
-  end
-  if PAGES[page] == 'regions' then Regions.enter() end
-  Tape.dirty = true
+  goto_page(name)
 end
 function dbg_shot(name)
   redraw()

@@ -2,6 +2,10 @@
 //
 // commands (times in seconds, rates in ×, levels as amplitude)
 //   open s f f     path, start position, ring window length
+//   reel_clear i   start a list of reel parts (i: how many follow; phase 8)
+//   reel_part s    one part's path, in order
+//   open_reel sffi reel path (its identity), start position, ring window
+//                  length, number of parts (only opens if that many arrived)
 //   ring f         ring window length; reopens the file at the current position
 //   rate f f       transport rate (-64..64; -256..256 with P2 loaded), glide time; leaves jog mode
 //   jog_nudge f    push the tape (enters jog mode at the current speed)
@@ -29,7 +33,7 @@
 // to the voice bus, the output stage (AurOut) at its tail
 
 Engine_Aurotate : CroneEngine {
-	var group, voiceBus, tape, out, staging;
+	var group, voiceBus, tape, out, staging, reelParts;
 
 	*new { |context, doneCallback| ^super.new(context, doneCallback) }
 
@@ -42,11 +46,23 @@ Engine_Aurotate : CroneEngine {
 		tape = AurTape(context.server, group, voiceBus.index, 64, 0);
 		out = AurOut(context.server, group, voiceBus.index, tape.posBus.index, context.out_b.index, 0);
 		staging = List.new;
+		reelParts = List.new;
 
 		// never name a command `load`: it collides with Lua's engine.load
 		this.addCommand(\open, "sff", { |msg|
 			tape.setRing(msg[3], false);
 			tape.open(msg[1].asString, msg[2])
+		});
+		this.addCommand(\reel_clear, "i", { reelParts = List.new });
+		this.addCommand(\reel_part, "s", { |msg| reelParts.add(msg[1].asString) });
+		this.addCommand(\open_reel, "sffi", { |msg|
+			if(reelParts.size == msg[4]) {
+				tape.setRing(msg[3], false);
+				tape.open(msg[1].asString, msg[2], reelParts.asArray)
+			} {
+				("Aurotate: % of % reel parts arrived; not opened".format(reelParts.size, msg[4])).postln
+			};
+			reelParts = List.new;
 		});
 		this.addCommand(\ring, "f", { |msg| tape.setRing(msg[1]) });
 		this.addCommand(\rate, "ff", { |msg| tape.setRate(msg[1], msg[2]) });
